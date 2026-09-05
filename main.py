@@ -3,7 +3,15 @@ import json
 from dataclasses import dataclass
 from datetime import datetime
 import os
+import sys
 import httpx
+
+if sys.platform == "win32":
+    try:
+        sys.stdout.reconfigure(encoding="utf-8")
+        sys.stderr.reconfigure(encoding="utf-8")
+    except Exception:
+        pass
 
 
 @dataclass
@@ -97,6 +105,8 @@ async def send_telegram_message(client: httpx.AsyncClient, chat_id: str, message
 
 
 async def broadcast_alert(client: httpx.AsyncClient, subscriber_manager: SubscriberManager, message: str) -> None:
+    if not TELEGRAM_BOT_TOKEN:
+        return
     subscribers = subscriber_manager.get_all_subscribers()
     if not subscribers:
         return
@@ -106,6 +116,9 @@ async def broadcast_alert(client: httpx.AsyncClient, subscriber_manager: Subscri
 
 
 async def process_telegram_updates(client: httpx.AsyncClient, subscriber_manager: SubscriberManager, offset: int = 0) -> int:
+    if not TELEGRAM_BOT_TOKEN:
+        return offset
+
     url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/getUpdates"
     params = {
         "offset": offset,
