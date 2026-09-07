@@ -84,11 +84,41 @@ def test_cache():
     print(f"✅ Cache opportunity callback verified! Found {len(detected)} opportunity(ies).")
 
 
+async def test_subscriber_manager():
+    print("Testing asynchronous SubscriberManager with aiofiles...")
+    import os
+    from telegram_bot import SubscriberManager
+    test_file = "test_subscribers.json"
+    if os.path.exists(test_file):
+        os.remove(test_file)
+
+    sub_mgr = SubscriberManager(test_file)
+    assert await sub_mgr.add_subscriber("111222") is True
+    assert await sub_mgr.add_subscriber("333444") is True
+    assert await sub_mgr.add_subscriber("111222") is False  # Duplicate
+    assert sub_mgr.count() == 2
+
+    # Verify a new instance loads the saved data from disk via aiofiles
+    sub_mgr2 = SubscriberManager(test_file)
+    loaded = await sub_mgr2.load()
+    assert "111222" in loaded
+    assert "333444" in loaded
+    assert sub_mgr2.count() == 2
+
+    assert await sub_mgr2.remove_subscriber("111222") is True
+    assert sub_mgr2.count() == 1
+
+    if os.path.exists(test_file):
+        os.remove(test_file)
+    print("✅ Asynchronous aiofiles SubscriberManager verified!")
+
+
 async def main():
     test_models()
     test_precisions()
     test_cache()
     await test_execution()
+    await test_subscriber_manager()
     print("\n🎉 ALL UNIT TESTS PASSED SUCCESSFULLY!")
 
 

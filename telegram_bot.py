@@ -2,42 +2,70 @@ import asyncio
 import json
 import os
 from typing import List, Optional
+import aiofiles
 import httpx
 from config import config
 from exchanges import NobitexClient, BitpinClient, WallexClient
 
 
 class SubscriberManager:
+    """
+    Asynchronous, non-blocking subscriber manager using aiofiles and asyncio.Lock.
+    Guarantees the asyncio event loop is never blocked by disk I/O.
+    """
     def __init__(self, filename: str):
         self.filename = filename
-        self.subscribers = self._load_subscribers()
+        self.subscribers: set = set()
+        self._lock = asyncio.Lock()
+        self._loaded: bool = False
 
-    def _load_subscribers(self) -> set:
+    async def load(self) -> set:
+        """Asynchronously load subscribers from disk using aiofiles."""
+        if not os.path.exists(self.filename):
+            self._loaded = True
+            return set()
         try:
-            with open(self.filename, "r", encoding="utf-8") as f:
-                data = json.load(f)
-                return set(data.get("subscribers", []))
+            async with aiofiles.open(self.filename, mode="r", encoding="utf-8") as f:
+                content = await f.read()
+                data = json.loads(content)
+                self.subscribers = set(data.get("subscribers", []))
+                self._loaded = True
+                return self.subscribers
         except (FileNotFoundError, json.JSONDecodeError):
+            self._loaded = True
+            return set()
+        except Exception as e:
+            print(f"[Error] Failed to load subscribers with aiofiles: {e}", flush=True)
+            self._loaded = True
             return set()
 
-    def _save_subscribers(self) -> None:
-        try:
-            with open(self.filename, "w", encoding="utf-8") as f:
-                json.dump({"subscribers": list(self.subscribers)}, f, indent=2)
-        except Exception as e:
-            print(f"[Error] Failed to save subscribers: {e}")
+    async def _ensure_loaded(self) -> None:
+        if not self._loaded:
+            await self.load()
 
-    def add_subscriber(self, chat_id: str) -> bool:
+    async def _save_subscribers(self) -> None:
+        """Asynchronously write subscribers to disk using aiofiles."""
+        try:
+            async with self._lock:
+                async with aiofiles.open(self.filename, mode="w", encoding="utf-8") as f:
+                    payload = json.dumps({"subscribers": list(self.subscribers)}, indent=2)
+                    await f.write(payload)
+        except Exception as e:
+            print(f"[Error] Failed to save subscribers with aiofiles: {e}", flush=True)
+
+    async def add_subscriber(self, chat_id: str) -> bool:
+        await self._ensure_loaded()
         if chat_id not in self.subscribers:
             self.subscribers.add(chat_id)
-            self._save_subscribers()
+            await self._save_subscribers()
             return True
         return False
 
-    def remove_subscriber(self, chat_id: str) -> bool:
+    async def remove_subscriber(self, chat_id: str) -> bool:
+        await self._ensure_loaded()
         if chat_id in self.subscribers:
             self.subscribers.remove(chat_id)
-            self._save_subscribers()
+            await self._save_subscribers()
             return True
         return False
 
@@ -120,7 +148,7 @@ class TelegramBot:
                 is_admin = chat_id in self.admin_ids
 
                 if text == "/start":
-                    if self.sub_mgr.add_subscriber(chat_id):
+                    if await self.sub_mgr.add_subscriber(chat_id):
                         reply = (
                             "🚀 <b>Welcome to the High-Speed Arbitrage Bot!</b>\n\n"
                             "You will receive real-time alerts and execution receipts.\n\n"
@@ -136,7 +164,7 @@ class TelegramBot:
                     await self.send_message(client, chat_id, reply)
 
                 elif text == "/stop":
-                    if self.sub_mgr.remove_subscriber(chat_id):
+                    if await self.sub_mgr.remove_subscriber(chat_id):
                         reply = "👋 You have been unsubscribed. Send /start to rejoin."
                     else:
                         reply = "ℹ️ You were not subscribed."

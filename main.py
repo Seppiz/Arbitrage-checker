@@ -115,8 +115,9 @@ async def main():
 
     # 1. Initialize Telegram Bot & Subscribers
     sub_mgr = SubscriberManager(config.subscribers_file)
+    await sub_mgr.load()
     for admin_id in config.telegram_admin_ids:
-        sub_mgr.add_subscriber(admin_id)
+        await sub_mgr.add_subscriber(admin_id)
 
     bot = TelegramBot(
         token=config.telegram_bot_token,
