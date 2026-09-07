@@ -1,11 +1,11 @@
 import asyncio
-import json
-from dataclasses import dataclass
-from datetime import datetime
 import os
 import sys
+import time
+from datetime import datetime
 import httpx
 
+# Configure UTF-8 encoding on Windows to support emojis and symbols
 if sys.platform == "win32":
     try:
         sys.stdout.reconfigure(encoding="utf-8")
@@ -13,430 +13,189 @@ if sys.platform == "win32":
     except Exception:
         pass
 
+from config import config, DEFAULT_SYMBOLS, DEFAULT_FEES_PERCENT
+from models import Quote, Opportunity, evaluate_arbitrage
+from exchanges import NobitexClient, BitpinClient, WallexClient
+from streamers import OrderBookCache, NobitexWebSocket, BitpinWebSocket, WallexStreamer
+from execution import ArbitrageExecutor
+from telegram_bot import SubscriberManager, TelegramBot
 
-@dataclass
-class Quote:
-    exchange: str
-    symbol: str
-    bid: float
-    ask: float
-
-
-TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
-
-SUBSCRIBERS_FILE = "subscribers.json"
-
-raw_admin_ids = os.getenv("TELEGRAM_ADMIN_IDS", "")
-ADMIN_CHAT_IDS = [cid.strip() for cid in raw_admin_ids.split(",") if cid.strip()]
-
-FEES_PERCENT = {
-    "nobitex": 0.13,
-    "bitpin": 0.10,
-    "wallex": 0.15,
-}
-
-SYMBOLS = [
-    "BTC", "ETH", "SOL", "BNB", "XRP", "ADA", "AVAX", "DOT", "LINK", "NEAR", "SUI", "APT",
-    "TRX", "LTC", "BCH", "ATOM", "FTM", "INJ", "RENDER", "FET", "TIA", "ARB", "OP",
-    "DOGE", "SHIB", "PEPE", "TON", "NOT", "DOGS", "HMSTR", "CATI", "FLOKI", "BONK", "WIF", "BOME",
-]
-
-TRADE_AMOUNT_USDT = 100.0
-CHECK_INTERVAL = 15
-CONCURRENCY_LIMIT = 8
-semaphore = asyncio.Semaphore(CONCURRENCY_LIMIT)
+# Re-export key variables for backward compatibility
+SYMBOLS = config.symbols
+TRADE_AMOUNT_USDT = config.trade_amount_usdt
+FEES_PERCENT = config.fees_percent
 
 
-class SubscriberManager:
-    def __init__(self, filename: str):
-        self.filename = filename
-        self.subscribers = self._load_subscribers()
-    
-    def _load_subscribers(self) -> set:
-        try:
-            with open(self.filename, 'r') as f:
-                data = json.load(f)
-                return set(data.get("subscribers", []))
-        except (FileNotFoundError, json.JSONDecodeError):
-            return set()
-    
-    def _save_subscribers(self) -> None:
-        try:
-            with open(self.filename, 'w') as f:
-                json.dump({"subscribers": list(self.subscribers)}, f, indent=2)
-        except Exception as e:
-            print(f"[Error] Failed to save subscribers: {e}")
-    
-    def add_subscriber(self, chat_id: str) -> bool:
-        if chat_id not in self.subscribers:
-            self.subscribers.add(chat_id)
-            self._save_subscribers()
-            return True
-        return False
-    
-    def remove_subscriber(self, chat_id: str) -> bool:
-        if chat_id in self.subscribers:
-            self.subscribers.remove(chat_id)
-            self._save_subscribers()
-            return True
-        return False
-    
-    def get_all_subscribers(self) -> list:
-        return list(self.subscribers)
-    
-    def count(self) -> int:
-        return len(self.subscribers)
-
-
-async def send_telegram_message(client: httpx.AsyncClient, chat_id: str, message: str) -> bool:
-    url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
-    payload = {
-        "chat_id": chat_id,
-        "text": message,
-        "parse_mode": "HTML",
-    }
-    try:
-        response = await client.post(url, json=payload, timeout=5.0)
-        response.raise_for_status()
-        return True
-    except Exception as e:
-        print(f"\n[Telegram Error]: Failed to send to {chat_id}: {e}")
-        return False
-
-
-async def broadcast_alert(client: httpx.AsyncClient, subscriber_manager: SubscriberManager, message: str) -> None:
-    if not TELEGRAM_BOT_TOKEN:
-        return
-    subscribers = subscriber_manager.get_all_subscribers()
-    if not subscribers:
-        return
-    
-    tasks = [send_telegram_message(client, chat_id, message) for chat_id in subscribers]
-    await asyncio.gather(*tasks, return_exceptions=True)
-
-
-async def process_telegram_updates(client: httpx.AsyncClient, subscriber_manager: SubscriberManager, offset: int = 0) -> int:
-    if not TELEGRAM_BOT_TOKEN:
-        return offset
-
-    url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/getUpdates"
-    params = {
-        "offset": offset,
-        "timeout": 0,
-    }
-    
-    try:
-        response = await client.get(url, params=params, timeout=5.0)
-        response.raise_for_status()
-        data = response.json()
-        
-        updates = data.get("result", [])
-        max_update_id = offset
-        
-        for update in updates:
-            update_id = update.get("update_id", 0)
-            max_update_id = max(max_update_id, update_id + 1)
-            
-            message = update.get("message")
-            if not message:
-                continue
-            
-            chat_id = str(message.get("chat", {}).get("id", ""))
-            text = message.get("text", "")
-            
-            if text == "/start":
-                if subscriber_manager.add_subscriber(chat_id):
-                    welcome_msg = (
-                        "🚀 <b>Welcome to the Arbitrage Scanner Bot!</b>\n\n"
-                        "You'll receive alerts whenever profitable arbitrage opportunities are detected.\n\n"
-                        "Commands:\n"
-                        "/start - Start receiving alerts\n"
-                        "/stop - Stop receiving alerts\n"
-                        "/status - Check current settings\n"
-                        "/help - Show this help message"
-                    )
-                else:
-                    welcome_msg = "✅ You're already subscribed to alerts!"
-                
-                await send_telegram_message(client, chat_id, welcome_msg)
-            
-            elif text == "/stop":
-                if subscriber_manager.remove_subscriber(chat_id):
-                    goodbye_msg = "👋 You've been unsubscribed from alerts. Use /start to subscribe again."
-                else:
-                    goodbye_msg = "ℹ️ You weren't subscribed."
-                
-                await send_telegram_message(client, chat_id, goodbye_msg)
-            
-            elif text == "/status":
-                status_msg = (
-                    f"📊 <b>Bot Status</b>\n\n"
-                    f"• Status: Running ✅\n"
-                    f"• Watching: {len(SYMBOLS)} coins\n"
-                    f"• Capital per trade: {TRADE_AMOUNT_USDT:,.0f} USDT\n"
-                    f"• Check interval: {CHECK_INTERVAL}s\n"
-                    f"• Subscribers: {subscriber_manager.count()}"
-                )
-                await send_telegram_message(client, chat_id, status_msg)
-            
-            elif text == "/help":
-                help_msg = (
-                    "🤖 <b>Available Commands:</b>\n\n"
-                    "/start - Start receiving alerts\n"
-                    "/stop - Stop receiving alerts\n"
-                    "/status - Check current settings\n"
-                    "/help - Show this help message"
-                )
-                await send_telegram_message(client, chat_id, help_msg)
-            
-            elif text == "/broadcast" and chat_id in ADMIN_CHAT_IDS:
-                admin_msg = f"📊 Currently {subscriber_manager.count()} subscribers"
-                await send_telegram_message(client, chat_id, admin_msg)
-        
-        return max_update_id
-    
-    except Exception as e:
-        print(f"\n[Telegram Update Error]: {e}")
-        return offset
-
-
+# Backward-compatible single-pair REST getters (preserved from original main.py)
 async def get_nobitex(client: httpx.AsyncClient, symbol: str) -> Quote:
-    async with semaphore:
-        url = "https://apiv2.nobitex.ir/market/stats"
-        response = await client.get(
-            url,
-            params={
-                "srcCurrency": symbol.lower(),
-                "dstCurrency": "usdt",
-            },
-            headers={"User-Agent": "ArbitBot/CryptoArbitrage-1.0.0"},
-        )
-        response.raise_for_status()
-        data = response.json()
-
-        key = f"{symbol.lower()}-usdt"
-        market = data.get("stats", {}).get(key)
-        if not market or not market.get("bestBuy") or not market.get("bestSell"):
-            raise ValueError(f"Nobitex: No market for {symbol}-USDT")
-
-        bid = float(market["bestBuy"])
-        ask = float(market["bestSell"])
-        if bid <= 0 or ask <= 0:
-            raise ValueError("Nobitex: Invalid bid/ask")
-
-        return Quote(exchange="nobitex", symbol=symbol, bid=bid, ask=ask)
+    url = "https://apiv2.nobitex.ir/market/stats"
+    res = await client.get(url, params={"srcCurrency": symbol.lower(), "dstCurrency": "usdt"}, timeout=5.0)
+    res.raise_for_status()
+    data = res.json()
+    key = f"{symbol.lower()}-usdt"
+    market = data.get("stats", {}).get(key)
+    if not market or not market.get("bestBuy") or not market.get("bestSell"):
+        raise ValueError(f"Nobitex: No market for {symbol}-USDT")
+    return Quote(exchange="nobitex", symbol=symbol.upper(), bid=float(market["bestBuy"]), ask=float(market["bestSell"]), timestamp=time.time())
 
 
 async def get_bitpin(client: httpx.AsyncClient, symbol: str) -> Quote:
-    async with semaphore:
-        url = f"https://api.bitpin.org/api/v1/mth/orderbook/{symbol.upper()}_USDT/"
-        response = await client.get(
-            url,
-            headers={"User-Agent": "ArbitBot/CryptoArbitrage-1.0.0"},
-        )
-        response.raise_for_status()
-        data = response.json()
-
-        bids = data.get("bids", [])
-        asks = data.get("asks", [])
-        if not bids or not asks:
-            raise ValueError(f"Bitpin: Empty orderbook for {symbol}_USDT")
-
-        bid = max(float(order[0]) for order in bids)
-        ask = min(float(order[0]) for order in asks)
-        if bid <= 0 or ask <= 0:
-            raise ValueError("Bitpin: Invalid bid/ask")
-
-        return Quote(exchange="bitpin", symbol=symbol, bid=bid, ask=ask)
+    url = f"https://api.bitpin.org/api/v1/mth/orderbook/{symbol.upper()}_USDT/"
+    res = await client.get(url, timeout=5.0)
+    res.raise_for_status()
+    data = res.json()
+    bids = data.get("bids", [])
+    asks = data.get("asks", [])
+    if not bids or not asks:
+        raise ValueError(f"Bitpin: Empty orderbook for {symbol}_USDT")
+    return Quote(exchange="bitpin", symbol=symbol.upper(), bid=float(bids[0][0]), ask=float(asks[0][0]), timestamp=time.time())
 
 
 async def get_wallex(client: httpx.AsyncClient, symbol: str) -> Quote:
-    async with semaphore:
-        url = "https://api.wallex.ir/v1/depth"
-        response = await client.get(
-            url,
-            params={"symbol": f"{symbol.upper()}USDT"},
-            headers={"User-Agent": "ArbitBot/CryptoArbitrage-1.0.0"},
-        )
-        response.raise_for_status()
-        data = response.json()
-
-        order_book = data.get("result", {})
-        bids = order_book.get("bid", [])
-        asks = order_book.get("ask", [])
-
-        if not bids or not asks:
-            raise ValueError(f"Wallex: Empty orderbook for {symbol}USDT")
-
-        bid = max(float(order["price"]) for order in bids)
-        ask = min(float(order["price"]) for order in asks)
-        if bid <= 0 or ask <= 0:
-            raise ValueError("Wallex: Invalid bid/ask")
-
-        return Quote(exchange="wallex", symbol=symbol, bid=bid, ask=ask)
-
-
-@dataclass
-class Opportunity:
-    symbol: str
-    buy_exchange: str
-    sell_exchange: str
-    buy_price: float
-    sell_price: float
-    spread_pct: float
-    net_profit_usdt: float
-    roi_pct: float
-    coin_amount: float
-    total_fees_usdt: float
-
-
-def evaluate_arbitrage(
-    buy: Quote,
-    sell: Quote,
-    capital_usdt: float,
-    buy_fee_pct: float,
-    sell_fee_pct: float,
-) -> Opportunity | None:
-    buy_fee_rate = buy_fee_pct / 100.0
-    sell_fee_rate = sell_fee_pct / 100.0
-
-    buy_fee_usdt = capital_usdt * buy_fee_rate
-    usdt_for_coins = capital_usdt - buy_fee_usdt
-    coin_bought = usdt_for_coins / buy.ask
-
-    gross_revenue_usdt = coin_bought * sell.bid
-    sell_fee_usdt = gross_revenue_usdt * sell_fee_rate
-    net_revenue_usdt = gross_revenue_usdt - sell_fee_usdt
-
-    net_profit_usdt = net_revenue_usdt - capital_usdt
-    roi_pct = (net_profit_usdt / capital_usdt) * 100.0
-    spread_pct = ((sell.bid - buy.ask) / buy.ask) * 100.0
-    total_fees_usdt = buy_fee_usdt + sell_fee_usdt
-
-    if net_profit_usdt > 0:
-        return Opportunity(
-            symbol=buy.symbol,
-            buy_exchange=buy.exchange,
-            sell_exchange=sell.exchange,
-            buy_price=buy.ask,
-            sell_price=sell.bid,
-            spread_pct=spread_pct,
-            net_profit_usdt=net_profit_usdt,
-            roi_pct=roi_pct,
-            coin_amount=coin_bought,
-            total_fees_usdt=total_fees_usdt,
-        )
-
-    return None
+    url = "https://api.wallex.ir/v1/depth"
+    res = await client.get(url, params={"symbol": f"{symbol.upper()}USDT"}, timeout=5.0)
+    res.raise_for_status()
+    data = res.json()
+    bids = data.get("result", {}).get("bid", [])
+    asks = data.get("result", {}).get("ask", [])
+    if not bids or not asks:
+        raise ValueError(f"Wallex: Empty orderbook for {symbol}USDT")
+    return Quote(exchange="wallex", symbol=symbol.upper(), bid=float(bids[0]["price"]), ask=float(asks[0]["price"]), timestamp=time.time())
 
 
 async def scan_single_symbol(client: httpx.AsyncClient, symbol: str) -> list[Opportunity]:
+    """Scans a single symbol via REST (preserved for testing and manual one-off scans)."""
     results = await asyncio.gather(
         get_nobitex(client, symbol),
         get_bitpin(client, symbol),
         get_wallex(client, symbol),
         return_exceptions=True,
     )
-
-    quotes: list[Quote] = [r for r in results if isinstance(r, Quote)]
+    quotes = [r for r in results if isinstance(r, Quote)]
     if len(quotes) < 2:
         return []
-
-    opportunities: list[Opportunity] = []
+    opportunities = []
     for buy in quotes:
         for sell in quotes:
             if buy.exchange == sell.exchange:
                 continue
-
             opp = evaluate_arbitrage(
                 buy=buy,
                 sell=sell,
-                capital_usdt=TRADE_AMOUNT_USDT,
-                buy_fee_pct=FEES_PERCENT.get(buy.exchange, 0.13),
-                sell_fee_pct=FEES_PERCENT.get(sell.exchange, 0.13),
+                capital_usdt=config.trade_amount_usdt,
+                buy_fee_pct=config.fees_percent.get(buy.exchange, 0.15),
+                sell_fee_pct=config.fees_percent.get(sell.exchange, 0.15),
             )
             if opp:
                 opportunities.append(opp)
-
     return opportunities
 
 
-async def run_scan_cycle(client: httpx.AsyncClient, subscriber_manager: SubscriberManager) -> None:
-    now_str = datetime.now().strftime("%H:%M:%S")
-    print(f"[{now_str}] Scanning {len(SYMBOLS)} coins across Nobitex, Bitpin & Wallex...", end="\r")
-
-    tasks = [scan_single_symbol(client, sym) for sym in SYMBOLS]
-    results = await asyncio.gather(*tasks)
-
-    all_opportunities: list[Opportunity] = []
-    for opp_list in results:
-        all_opportunities.extend(opp_list)
-
-    print(" " * 85, end="\r")
-
-    if all_opportunities:
-        all_opportunities.sort(key=lambda x: x.net_profit_usdt, reverse=True)
-        print("\a", end="")
-
-        print(f"\n🔥 [{now_str}] FOUND {len(all_opportunities)} PROFITABLE ARBITRAGE OPPORTUNITY(IES):")
-        print("=" * 80)
-
-        for opp in all_opportunities:
-            details = (
-                f"💰 <b>{opp.symbol}</b> | {opp.buy_exchange.upper()} ➡️ {opp.sell_exchange.upper()}\n"
-                f"• Buy: {opp.buy_price:,.6g} USDT on {opp.buy_exchange.upper()}\n"
-                f"• Sell: {opp.sell_price:,.6g} USDT on {opp.sell_exchange.upper()}\n"
-                f"• Spread: {opp.spread_pct:+.2f}%\n"
-                f"• Fees: {opp.total_fees_usdt:.2f} USDT\n"
-                f"• <b>Net Profit: {opp.net_profit_usdt:+.2f} USDT ({opp.roi_pct:+.2f}% ROI)</b>"
-            )
-            print(details.replace("<b>", "").replace("</b>", ""))
-            print("-" * 60)
-
-            if subscriber_manager.count() > 0:
-                tg_message = f"🚨 <b>ARBITRAGE OPPORTUNITY FOUND!</b>\n\n{details}\n\n<i>Capital: {TRADE_AMOUNT_USDT:,.0f} USDT</i>"
-                await broadcast_alert(client, subscriber_manager, tg_message)
-
-        print("=" * 80 + "\n")
-    else:
-        print(f"[{now_str}] Checked {len(SYMBOLS)} coins. No profitable opportunity. (Next check in {CHECK_INTERVAL}s) | Subscribers: {subscriber_manager.count()}")
+async def telegram_polling_loop(bot: TelegramBot, executor: ArbitrageExecutor, nobitex, bitpin, wallex, client: httpx.AsyncClient):
+    """Periodically polls Telegram for user commands."""
+    while True:
+        try:
+            await bot.process_updates(client, executor, nobitex, bitpin, wallex)
+        except asyncio.CancelledError:
+            break
+        except Exception:
+            pass
+        await asyncio.sleep(1.0)
 
 
 async def main():
     print("=" * 80)
-    print("🚀 Crypto Arbitrage Scanner with Telegram Bot")
-    print(f"Watching: {len(SYMBOLS)} coins across Nobitex, Bitpin, Wallex")
-    print(f"Capital: {TRADE_AMOUNT_USDT:,.2f} USDT")
-    
-    if TELEGRAM_BOT_TOKEN:
-        print(f"📱 Telegram Bot: ENABLED ✅")
-        print("   Users can subscribe by sending /start to your bot")
+    print("🚀 REAL-TIME WEBSOCKET ARBITRAGE & AUTO-EXECUTION BOT")
+    print("=" * 80)
+    print(f"📊 Monitored Symbols: {len(config.symbols)} coins across Nobitex, Bitpin, and Wallex")
+    print(f"💰 Capital per Trade: {config.trade_amount_usdt:,.2f} USDT")
+    print(f"🎯 Min Profit Target: {config.min_profit_usdt:.2f} USDT (Min {config.min_roi_pct:.2f}% ROI)")
+    print(f"🛡️ Safety Mode: {'🧪 DRY-RUN (Paper Simulation)' if config.dry_run else '⚡ LIVE TRADING (Real Execution)'}")
+    print(f"⏱️ Cooldown per Coin: {config.trade_cooldown_seconds} seconds")
+
+    # 1. Initialize Telegram Bot & Subscribers
+    sub_mgr = SubscriberManager(config.subscribers_file)
+    for admin_id in config.telegram_admin_ids:
+        sub_mgr.add_subscriber(admin_id)
+
+    bot = TelegramBot(
+        token=config.telegram_bot_token,
+        admin_ids=config.telegram_admin_ids,
+        subscriber_manager=sub_mgr,
+    )
+    if config.telegram_bot_token:
+        print(f"📱 Telegram Bot: ENABLED ✅ ({sub_mgr.count()} subscribers)")
     else:
-        print("📱 Telegram Bot: DISABLED (Set TELEGRAM_BOT_TOKEN)")
-    print("=" * 80 + "\n")
+        print("📱 Telegram Bot: DISABLED (Set TELEGRAM_BOT_TOKEN in .env)")
 
-    subscriber_manager = SubscriberManager(SUBSCRIBERS_FILE)
-    print(f"📊 Loaded {subscriber_manager.count()} subscribers")
-    
-    for admin_id in ADMIN_CHAT_IDS:
-        subscriber_manager.add_subscriber(admin_id)
-    
-    print(f"👑 Admin IDs: {', '.join(ADMIN_CHAT_IDS)}")
-    print("=" * 80 + "\n")
+    # 2. Initialize Exchange Clients
+    nobitex_client = NobitexClient(token=config.nobitex_api_token, dry_run=config.dry_run)
+    bitpin_client = BitpinClient(api_key=config.bitpin_api_key, dry_run=config.dry_run)
+    wallex_client = WallexClient(api_key=config.wallex_api_key, dry_run=config.dry_run)
 
-    update_offset = 0
-    
-    async with httpx.AsyncClient(timeout=10) as client:
-        while True:
-            try:
-                update_offset = await process_telegram_updates(client, subscriber_manager, update_offset)
-                await run_scan_cycle(client, subscriber_manager)
-                
-            except Exception as e:
-                print(f"\n[Error in main loop]: {e}")
+    async with httpx.AsyncClient(timeout=10.0) as http_client:
+        # 3. Initialize Execution Engine
+        def on_trade_receipt(receipt: str):
+            asyncio.create_task(bot.broadcast(http_client, receipt))
 
-            await asyncio.sleep(CHECK_INTERVAL)
+        executor = ArbitrageExecutor(
+            nobitex=nobitex_client,
+            bitpin=bitpin_client,
+            wallex=wallex_client,
+            on_trade_executed_cb=on_trade_receipt,
+        )
+
+        # 4. Opportunity Callback from Real-Time Streamers
+        last_console_log: dict = {}
+
+        def on_opportunity_detected(opp: Opportunity):
+            now = time.time()
+            # Throttle console printing per symbol to once every 5 seconds to keep terminal clean
+            if now - last_console_log.get(opp.symbol, 0) >= 5.0:
+                last_console_log[opp.symbol] = now
+                now_str = datetime.now().strftime("%H:%M:%S")
+                print(
+                    f"\n🔥 [{now_str}] LIVE ARBITRAGE: {opp.symbol} | {opp.buy_exchange.upper()} -> {opp.sell_exchange.upper()} "
+                    f"| Spread: {opp.spread_pct:+.2f}% | Net Profit: +{opp.net_profit_usdt:.2f} USDT (+{opp.roi_pct:.2f}% ROI)",
+                    flush=True,
+                )
+            # Dispatch execution to executor (which manages its own strict cooldown & filters)
+            asyncio.create_task(executor.execute_opportunity(opp, http_client))
+
+        # 5. Initialize OrderBook Cache & Streamers
+        cache = OrderBookCache(
+            symbols=config.symbols,
+            fees_percent=config.fees_percent,
+            on_opportunity_cb=on_opportunity_detected,
+        )
+
+        nobitex_ws = NobitexWebSocket(cache, config.symbols)
+        bitpin_ws = BitpinWebSocket(cache, config.symbols)
+        wallex_streamer = WallexStreamer(cache, config.symbols, interval=1.5)
+
+        print("=" * 80)
+        print("🚀 Starting real-time WebSocket streams and trading engine...\n", flush=True)
+
+        tasks = [
+            asyncio.create_task(nobitex_ws.run()),
+            asyncio.create_task(bitpin_ws.run()),
+            asyncio.create_task(wallex_streamer.run(http_client)),
+            asyncio.create_task(telegram_polling_loop(bot, executor, nobitex_client, bitpin_client, wallex_client, http_client)),
+        ]
+
+        try:
+            await asyncio.gather(*tasks)
+        except (KeyboardInterrupt, asyncio.CancelledError):
+            print("\n👋 Shutting down arbitrage bot cleanly...")
+            nobitex_ws.running = False
+            bitpin_ws.running = False
+            wallex_streamer.running = False
+            for t in tasks:
+                t.cancel()
 
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    try:
+        asyncio.run(main())
+    except KeyboardInterrupt:
+        print("\n👋 Bot stopped.")
