@@ -148,7 +148,6 @@ async def main():
 
         # 4. Opportunity Callback from Real-Time Streamers
         last_console_log: dict = {}
-        last_tg_alert: dict = {}
 
         def on_opportunity_detected(opp: Opportunity):
             now = time.time()
@@ -165,11 +164,6 @@ async def main():
                 except Exception:
                     pass
 
-            # Throttle Telegram alerts per symbol (every trade_cooldown_seconds, min 15s)
-            tg_cooldown = max(15, config.trade_cooldown_seconds)
-            if now - last_tg_alert.get(opp.symbol, 0) >= tg_cooldown:
-                last_tg_alert[opp.symbol] = now
-                asyncio.create_task(bot.broadcast(http_client, opp.format_details()))
 
             # Safely dispatch execution to executor (which manages its own strict cooldown & filters)
             async def safe_execute():
