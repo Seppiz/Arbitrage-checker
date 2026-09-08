@@ -16,12 +16,23 @@ DEFAULT_PRECISIONS = {
 }
 
 
+from decimal import Decimal, ROUND_DOWN
+
+
 def round_amount(symbol: str, amount: float) -> float:
     decimals = DEFAULT_PRECISIONS.get(symbol.upper(), 4)
     if decimals == 0:
-        return float(math.floor(amount))
-    factor = 10 ** decimals
-    return math.floor(amount * factor) / factor
+        return float(int(amount))
+    d = Decimal(str(amount)).quantize(Decimal(f"1e-{decimals}"), rounding=ROUND_DOWN)
+    return float(d)
+
+
+def format_amount(symbol: str, amount: float) -> str:
+    decimals = DEFAULT_PRECISIONS.get(symbol.upper(), 4)
+    if decimals == 0:
+        return str(int(amount))
+    d = Decimal(str(amount)).quantize(Decimal(f"1e-{decimals}"), rounding=ROUND_DOWN)
+    return f"{d:f}"
 
 
 class ExchangeClient:
@@ -348,8 +359,10 @@ class WallexClient(ExchangeClient):
         try:
             res = await client.post(url, json=payload, headers=self._headers(), timeout=5.0)
             data = res.json()
-            if data.get("success") is True or res.status_code in (200, 201):
-                order_id = str(data.get("result", {}).get("clientOrderId", uuid.uuid4().hex[:8]))
+            if data.get("success") is True and "result" in data:
+                result_data = data.get("result", {})
+                order_id = str(result_data.get("clientOrderId") or result_data.get("orderId", uuid.uuid4().hex[:8]))
+                executed_qty = float(result_data.get("executedQty", rounded_qty))
                 return OrderResult(
                     success=True,
                     order_id=order_id,
@@ -358,7 +371,7 @@ class WallexClient(ExchangeClient):
                     side=req.side,
                     price=req.price,
                     amount=rounded_qty,
-                    filled_amount=rounded_qty,
+                    filled_amount=executed_qty,
                     timestamp=now,
                 )
             return OrderResult(

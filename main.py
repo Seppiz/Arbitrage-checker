@@ -137,7 +137,7 @@ async def main():
     async with httpx.AsyncClient(timeout=10.0) as http_client:
         # 3. Initialize Execution Engine
         def on_trade_receipt(receipt: str):
-            asyncio.create_task(bot.broadcast(http_client, receipt))
+            asyncio.create_task(bot.broadcast(http_client, receipt, admin_only=True))
 
         executor = ArbitrageExecutor(
             nobitex=nobitex_client,

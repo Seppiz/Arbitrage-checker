@@ -105,13 +105,14 @@ class TelegramBot:
             print(f"\n[Telegram Error] Failed to send to {chat_id}: {e}", flush=True)
             return False
 
-    async def broadcast(self, client: httpx.AsyncClient, text: str) -> None:
+    async def broadcast(self, client: httpx.AsyncClient, text: str, admin_only: bool = False) -> None:
         if not self.token:
             return
-        subs = self.sub_mgr.get_all_subscribers()
-        if not subs:
+        # If admin_only is True, strictly send to admin_ids to prevent sensitive leaks
+        recipients = self.admin_ids if admin_only else self.sub_mgr.get_all_subscribers()
+        if not recipients:
             return
-        tasks = [self.send_message(client, chat_id, text) for chat_id in subs]
+        tasks = [self.send_message(client, chat_id, text) for chat_id in recipients]
         await asyncio.gather(*tasks, return_exceptions=True)
 
     async def process_updates(
@@ -188,6 +189,9 @@ class TelegramBot:
                     await self.send_message(client, chat_id, reply)
 
                 elif text == "/balance":
+                    if not is_admin:
+                        await self.send_message(client, chat_id, "⛔ <b>Access Denied:</b> Balances are restricted to administrator accounts.")
+                        continue
                     await self.send_message(client, chat_id, "⏳ Fetching balances from Nobitex, Bitpin, and Wallex...")
                     nob_bals, bp_bals, wlx_bals = await asyncio.gather(
                         nobitex.get_all_balances(client),

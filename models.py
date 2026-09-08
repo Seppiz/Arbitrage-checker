@@ -28,7 +28,8 @@ class Opportunity:
     net_profit_usdt: float
     roi_pct: float
     coin_amount: float
-    total_fees_usdt: float
+    gross_coin_amount: float = 0.0
+    total_fees_usdt: float = 0.0
     has_sufficient_depth: bool = True
     timestamp: float = 0.0
 
@@ -99,10 +100,10 @@ def evaluate_arbitrage(
     buy_fee_rate = buy_fee_pct / 100.0
     sell_fee_rate = sell_fee_pct / 100.0
 
-    buy_fee_usdt = capital_usdt * buy_fee_rate
-    usdt_for_coins = capital_usdt - buy_fee_usdt
-    coin_bought = usdt_for_coins / buy.ask
+    gross_coins = capital_usdt / buy.ask
+    coin_bought = gross_coins * (1.0 - buy_fee_rate)
 
+    buy_fee_usdt = capital_usdt * buy_fee_rate
     gross_revenue_usdt = coin_bought * sell.bid
     sell_fee_usdt = gross_revenue_usdt * sell_fee_rate
     net_revenue_usdt = gross_revenue_usdt - sell_fee_usdt
@@ -134,6 +135,7 @@ def evaluate_arbitrage(
             net_profit_usdt=net_profit_usdt,
             roi_pct=roi_pct,
             coin_amount=coin_bought,
+            gross_coin_amount=gross_coins,
             total_fees_usdt=total_fees_usdt,
             has_sufficient_depth=has_depth,
             timestamp=time.time(),

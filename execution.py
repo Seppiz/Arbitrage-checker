@@ -28,6 +28,7 @@ class ArbitrageExecutor:
         self.is_halted: bool = False
         self.total_trades_count: int = 0
         self.total_realized_profit_usdt: float = 0.0
+        self.execution_lock = asyncio.Lock()  # Prevents multi-symbol balance exhaustion race conditions
 
     async def execute_opportunity(self, opp: Opportunity, client: httpx.AsyncClient):
         if self.is_halted:
@@ -52,129 +53,153 @@ class ArbitrageExecutor:
         if not buy_client or not sell_client:
             return
 
-        # 3. Balance Pre-flight Check (for Live Trading)
-        if not config.dry_run:
-            try:
-                usdt_bal = await buy_client.get_balance(client, "usdt")
-                if usdt_bal < config.trade_amount_usdt:
-                    print(
-                        f"⚠️ [Skipped Trade] Insufficient USDT on {opp.buy_exchange.upper()}: "
-                        f"Available {usdt_bal:.2f} < Required {config.trade_amount_usdt:.2f}",
-                        flush=True,
-                    )
+        # Acquire execution lock to prevent concurrent multi-symbol overspending
+        async with self.execution_lock:
+            # 3. Strict Pre-flight Balance Check (100% required)
+            if not config.dry_run:
+                try:
+                    usdt_bal = await buy_client.get_balance(client, "usdt")
+                    if usdt_bal < config.trade_amount_usdt:
+                        print(
+                            f"⚠️ [Skipped Trade] Insufficient USDT on {opp.buy_exchange.upper()}: "
+                            f"Available {usdt_bal:.2f} < Required {config.trade_amount_usdt:.2f}",
+                            flush=True,
+                        )
+                        return
+
+                    coin_bal = await sell_client.get_balance(client, opp.symbol)
+                    if coin_bal < opp.coin_amount:
+                        print(
+                            f"⚠️ [Skipped Trade] Insufficient {opp.symbol} on {opp.sell_exchange.upper()}: "
+                            f"Available {coin_bal:.4f} < Required {opp.coin_amount:.4f}",
+                            flush=True,
+                        )
+                        return
+                except Exception as e:
+                    print(f"❌ [Balance Check Error]: {e}", flush=True)
                     return
 
-                coin_bal = await sell_client.get_balance(client, opp.symbol)
-                if coin_bal < opp.coin_amount * 0.95:
-                    print(
-                        f"⚠️ [Skipped Trade] Insufficient {opp.symbol} on {opp.sell_exchange.upper()}: "
-                        f"Available {coin_bal:.4f} < Required {opp.coin_amount:.4f}",
-                        flush=True,
-                    )
-                    return
-            except Exception as e:
-                print(f"❌ [Balance Check Error]: {e}", flush=True)
-                return
+            # 4. Prepare Order Requests with Max Slippage Protection
+            slippage_rate = config.max_slippage_pct / 100.0
+            max_buy_price = opp.buy_price * (1.0 + slippage_rate)
+            min_sell_price = opp.sell_price * (1.0 - slippage_rate)
 
-        # 4. Prepare Order Requests
-        buy_req = OrderRequest(
-            exchange=opp.buy_exchange,
-            symbol=opp.symbol,
-            side="buy",
-            amount=opp.coin_amount,
-            price=opp.buy_price,
-            order_type="market",
-        )
-        sell_req = OrderRequest(
-            exchange=opp.sell_exchange,
-            symbol=opp.symbol,
-            side="sell",
-            amount=opp.coin_amount,
-            price=opp.sell_price,
-            order_type="market",
-        )
-
-        mode_str = "🧪 [SIMULATED / DRY-RUN]" if config.dry_run else "⚡ [LIVE TRADE]"
-        print(f"\n{mode_str} Executing Arbitrage on {opp.symbol}:", flush=True)
-        print(f"  • BUY {opp.coin_amount:,.6g} {opp.symbol} on {opp.buy_exchange.upper()} @ {opp.buy_price:,.6g}", flush=True)
-        print(f"  • SELL {opp.coin_amount:,.6g} {opp.symbol} on {opp.sell_exchange.upper()} @ {opp.sell_price:,.6g}", flush=True)
-
-        # 5. Concurrent Order Execution via asyncio.gather (Zero Lag!)
-        start_t = time.time()
-        results = await asyncio.gather(
-            buy_client.place_order(client, buy_req),
-            sell_client.place_order(client, sell_req),
-            return_exceptions=True,
-        )
-        elapsed_ms = (time.time() - start_t) * 1000
-
-        buy_res = results[0] if isinstance(results[0], OrderResult) else None
-        sell_res = results[1] if isinstance(results[1], OrderResult) else None
-
-        # 6. Audit Logging & Summary
-        success = (buy_res and buy_res.success) and (sell_res and sell_res.success)
-        if success:
-            self.total_trades_count += 1
-            self.total_realized_profit_usdt += opp.net_profit_usdt
-
-            receipt = (
-                f"{'🧪 <b>PAPER TRADE SIMULATION</b>' if config.dry_run else '🚀 <b>LIVE ARBITRAGE EXECUTED!</b>'}\n\n"
-                f"<b>Asset:</b> {opp.symbol} / USDT\n"
-                f"<b>Buy Order:</b> {opp.buy_exchange.upper()} (ID: <code>{buy_res.order_id}</code>)\n"
-                f"<b>Sell Order:</b> {opp.sell_exchange.upper()} (ID: <code>{sell_res.order_id}</code>)\n"
-                f"<b>Capital:</b> {config.trade_amount_usdt:.2f} USDT\n"
-                f"<b>Gross Spread:</b> {opp.spread_pct:+.2f}%\n"
-                f"<b>Est. Net Profit:</b> +{opp.net_profit_usdt:.2f} USDT (+{opp.roi_pct:.2f}%)\n"
-                f"<b>Execution Roundtrip:</b> {elapsed_ms:.1f} ms\n"
-                f"<b>Total Session Profit:</b> {self.total_realized_profit_usdt:+.2f} USDT ({self.total_trades_count} trades)"
+            buy_req = OrderRequest(
+                exchange=opp.buy_exchange,
+                symbol=opp.symbol,
+                side="buy",
+                amount=opp.gross_coin_amount if opp.gross_coin_amount > 0 else opp.coin_amount,
+                price=max_buy_price,
+                order_type="limit",  # Limit order protects against orderbook sweeping
             )
-            print(f"✅ {mode_str} Completed in {elapsed_ms:.1f}ms! Net Profit: +{opp.net_profit_usdt:.2f} USDT\n", flush=True)
-
-            if self.on_trade_executed:
-                self.on_trade_executed(receipt)
-        else:
-            # Check for dangerous One-Legged Execution (one side succeeded, other side failed)
-            rollback_msg = ""
-            if config.enable_auto_rollback:
-                if buy_res and buy_res.success and (not sell_res or not sell_res.success):
-                    # Buy filled, but Sell failed -> Immediately unwind by dumping bought coins on buy_exchange to recover USDT
-                    unwind_req = OrderRequest(
-                        exchange=opp.buy_exchange,
-                        symbol=opp.symbol,
-                        side="sell",
-                        amount=buy_res.filled_amount or opp.coin_amount,
-                        price=opp.buy_price * 0.98,
-                        order_type="market",
-                    )
-                    unwind_res = await buy_client.place_order(client, unwind_req)
-                    if unwind_res.success:
-                        rollback_msg = f"\n\n🛡️ <b>EMERGENCY ROLLBACK SUCCESSFUL:</b> Sold back {unwind_req.amount} {opp.symbol} on {opp.buy_exchange.upper()} to recover USDT. Exposure closed."
-                    else:
-                        rollback_msg = f"\n\n🚨 <b>ROLLBACK FAILED:</b> Could not sell back on {opp.buy_exchange.upper()}: {unwind_res.error}. MANUAL ATTENTION REQUIRED!"
-
-                elif sell_res and sell_res.success and (not buy_res or not buy_res.success):
-                    # Sell filled, but Buy failed -> Immediately unwind by rebuying coins on sell_exchange
-                    unwind_req = OrderRequest(
-                        exchange=opp.sell_exchange,
-                        symbol=opp.symbol,
-                        side="buy",
-                        amount=sell_res.filled_amount or opp.coin_amount,
-                        price=opp.sell_price * 1.02,
-                        order_type="market",
-                    )
-                    unwind_res = await sell_client.place_order(client, unwind_req)
-                    if unwind_res.success:
-                        rollback_msg = f"\n\n🛡️ <b>EMERGENCY ROLLBACK SUCCESSFUL:</b> Re-bought {unwind_req.amount} {opp.symbol} on {opp.sell_exchange.upper()} to restore inventory. Exposure closed."
-                    else:
-                        rollback_msg = f"\n\n🚨 <b>ROLLBACK FAILED:</b> Could not re-buy on {opp.sell_exchange.upper()}: {unwind_res.error}. MANUAL ATTENTION REQUIRED!"
-
-            err_msg = (
-                f"⚠️ <b>ARBITRAGE EXECUTION FAILED / PARTIAL</b>\n\n"
-                f"<b>Asset:</b> {opp.symbol}\n"
-                f"<b>Buy ({opp.buy_exchange.upper()}):</b> {'OK' if buy_res and buy_res.success else f'ERR: {buy_res.error if buy_res else results[0]}'}\n"
-                f"<b>Sell ({opp.sell_exchange.upper()}):</b> {'OK' if sell_res and sell_res.success else f'ERR: {sell_res.error if sell_res else results[1]}'}"
-                f"{rollback_msg}"
+            sell_req = OrderRequest(
+                exchange=opp.sell_exchange,
+                symbol=opp.symbol,
+                side="sell",
+                amount=opp.coin_amount,
+                price=min_sell_price,
+                order_type="limit",
             )
-            print(f"❌ Execution failed: {err_msg}", flush=True)
-            if self.on_trade_executed:
-                self.on_trade_executed(err_msg)
+
+            mode_str = "🧪 [SIMULATED / DRY-RUN]" if config.dry_run else "⚡ [LIVE TRADE]"
+            print(f"\n{mode_str} Executing Arbitrage on {opp.symbol}:", flush=True)
+            print(f"  • BUY {opp.coin_amount:,.6g} {opp.symbol} on {opp.buy_exchange.upper()} @ Max {max_buy_price:,.6g}", flush=True)
+            print(f"  • SELL {opp.coin_amount:,.6g} {opp.symbol} on {opp.sell_exchange.upper()} @ Min {min_sell_price:,.6g}", flush=True)
+
+            # 5. Concurrent Order Execution via asyncio.gather
+            start_t = time.time()
+            results = await asyncio.gather(
+                buy_client.place_order(client, buy_req),
+                sell_client.place_order(client, sell_req),
+                return_exceptions=True,
+            )
+            elapsed_ms = (time.time() - start_t) * 1000
+
+            buy_res = results[0] if isinstance(results[0], OrderResult) else None
+            sell_res = results[1] if isinstance(results[1], OrderResult) else None
+
+            # 6. Audit Logging, Partial Fill Reconciliation & Summary
+            success = (buy_res and buy_res.success) and (sell_res and sell_res.success)
+            if success:
+                # Reconcile partial fills if quantities differ
+                fill_discrepancy_msg = ""
+                b_filled = buy_res.filled_amount
+                s_filled = sell_res.filled_amount
+                diff = abs(b_filled - s_filled)
+                if diff > 0 and (diff / max(b_filled, s_filled, 0.0001)) > 0.05:
+                    if b_filled > s_filled:
+                        unwind_qty = b_filled - s_filled
+                        unwind_req = OrderRequest(opp.buy_exchange, opp.symbol, "sell", unwind_qty, opp.buy_price * 0.98, "market")
+                        await buy_client.place_order(client, unwind_req)
+                        fill_discrepancy_msg = f"\n⚠️ Partial fill discrepancy ({diff:.4g} {opp.symbol}) unwound on {opp.buy_exchange.upper()}."
+                    else:
+                        unwind_qty = s_filled - b_filled
+                        unwind_req = OrderRequest(opp.sell_exchange, opp.symbol, "buy", unwind_qty, opp.sell_price * 1.02, "market")
+                        await sell_client.place_order(client, unwind_req)
+                        fill_discrepancy_msg = f"\n⚠️ Partial fill discrepancy ({diff:.4g} {opp.symbol}) unwound on {opp.sell_exchange.upper()}."
+
+                self.total_trades_count += 1
+                self.total_realized_profit_usdt += opp.net_profit_usdt
+
+                receipt = (
+                    f"{'🧪 <b>PAPER TRADE SIMULATION</b>' if config.dry_run else '🚀 <b>LIVE ARBITRAGE EXECUTED!</b>'}\n\n"
+                    f"<b>Asset:</b> {opp.symbol} / USDT\n"
+                    f"<b>Buy Order:</b> {opp.buy_exchange.upper()} (ID: <code>{buy_res.order_id}</code>)\n"
+                    f"<b>Sell Order:</b> {opp.sell_exchange.upper()} (ID: <code>{sell_res.order_id}</code>)\n"
+                    f"<b>Capital:</b> {config.trade_amount_usdt:.2f} USDT\n"
+                    f"<b>Gross Spread:</b> {opp.spread_pct:+.2f}%\n"
+                    f"<b>Est. Net Profit:</b> +{opp.net_profit_usdt:.2f} USDT (+{opp.roi_pct:.2f}%)\n"
+                    f"<b>Execution Roundtrip:</b> {elapsed_ms:.1f} ms\n"
+                    f"<b>Total Session Profit:</b> {self.total_realized_profit_usdt:+.2f} USDT ({self.total_trades_count} trades)"
+                    f"{fill_discrepancy_msg}"
+                )
+                print(f"✅ {mode_str} Completed in {elapsed_ms:.1f}ms! Net Profit: +{opp.net_profit_usdt:.2f} USDT\n", flush=True)
+
+                if self.on_trade_executed:
+                    self.on_trade_executed(receipt)
+            else:
+                # Check for dangerous One-Legged Execution (one side succeeded, other side failed)
+                rollback_msg = ""
+                if config.enable_auto_rollback:
+                    if buy_res and buy_res.success and (not sell_res or not sell_res.success):
+                        # Buy filled, but Sell failed -> Immediately unwind by dumping bought coins on buy_exchange to recover USDT
+                        unwind_req = OrderRequest(
+                            exchange=opp.buy_exchange,
+                            symbol=opp.symbol,
+                            side="sell",
+                            amount=buy_res.filled_amount or opp.coin_amount,
+                            price=opp.buy_price * 0.98,
+                            order_type="market",
+                        )
+                        unwind_res = await buy_client.place_order(client, unwind_req)
+                        if unwind_res.success:
+                            rollback_msg = f"\n\n🛡️ <b>EMERGENCY ROLLBACK SUCCESSFUL:</b> Sold back {unwind_req.amount} {opp.symbol} on {opp.buy_exchange.upper()} to recover USDT. Exposure closed."
+                        else:
+                            rollback_msg = f"\n\n🚨 <b>ROLLBACK FAILED:</b> Could not sell back on {opp.buy_exchange.upper()}: {unwind_res.error}. MANUAL ATTENTION REQUIRED!"
+
+                    elif sell_res and sell_res.success and (not buy_res or not buy_res.success):
+                        # Sell filled, but Buy failed -> Immediately unwind by rebuying coins on sell_exchange
+                        unwind_req = OrderRequest(
+                            exchange=opp.sell_exchange,
+                            symbol=opp.symbol,
+                            side="buy",
+                            amount=sell_res.filled_amount or opp.coin_amount,
+                            price=opp.sell_price * 1.02,
+                            order_type="market",
+                        )
+                        unwind_res = await sell_client.place_order(client, unwind_req)
+                        if unwind_res.success:
+                            rollback_msg = f"\n\n🛡️ <b>EMERGENCY ROLLBACK SUCCESSFUL:</b> Re-bought {unwind_req.amount} {opp.symbol} on {opp.sell_exchange.upper()} to restore inventory. Exposure closed."
+                        else:
+                            rollback_msg = f"\n\n🚨 <b>ROLLBACK FAILED:</b> Could not re-buy on {opp.sell_exchange.upper()}: {unwind_res.error}. MANUAL ATTENTION REQUIRED!"
+
+                err_msg = (
+                    f"⚠️ <b>ARBITRAGE EXECUTION FAILED / PARTIAL</b>\n\n"
+                    f"<b>Asset:</b> {opp.symbol}\n"
+                    f"<b>Buy ({opp.buy_exchange.upper()}):</b> {'OK' if buy_res and buy_res.success else f'ERR: {buy_res.error if buy_res else results[0]}'}\n"
+                    f"<b>Sell ({opp.sell_exchange.upper()}):</b> {'OK' if sell_res and sell_res.success else f'ERR: {sell_res.error if sell_res else results[1]}'}"
+                    f"{rollback_msg}"
+                )
+                print(f"❌ Execution failed: {err_msg}", flush=True)
+                if self.on_trade_executed:
+                    self.on_trade_executed(err_msg)
