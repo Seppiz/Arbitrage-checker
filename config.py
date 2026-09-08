@@ -33,6 +33,8 @@ class BotConfig:
 
     # Exchange API Credentials
     nobitex_api_token: str = os.getenv("NOBITEX_API_TOKEN", "")
+    nobitex_api_key: str = os.getenv("NOBITEX_API_KEY", "")
+    nobitex_secret_key: str = os.getenv("NOBITEX_SECRET_KEY", "")
     bitpin_api_key: str = os.getenv("BITPIN_API_KEY", "")
     wallex_api_key: str = os.getenv("WALLEX_API_KEY", "")
 

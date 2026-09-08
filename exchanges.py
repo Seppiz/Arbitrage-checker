@@ -52,22 +52,50 @@ class ExchangeClient:
 
 
 class NobitexClient(ExchangeClient):
-    def __init__(self, token: str = "", dry_run: bool = True):
-        super().__init__("nobitex", api_key=token, dry_run=dry_run)
+    def __init__(self, token: str = "", api_key: str = "", secret_key: str = "", dry_run: bool = True):
+        effective_key = api_key or token
+        super().__init__("nobitex", api_key=effective_key, dry_run=dry_run)
         self.base_url = "https://apiv2.nobitex.ir"
+        self.token = token
+        self.secret_key = secret_key
+        self._priv_key = None
+        if self.secret_key:
+            try:
+                import base64
+                from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+                priv_bytes = base64.urlsafe_b64decode(self.secret_key)
+                self._priv_key = Ed25519PrivateKey.from_private_bytes(priv_bytes)
+            except Exception:
+                pass
 
-    def _headers(self) -> dict:
+    def _headers(self, method: str = "GET", full_path: str = "", body: str = "") -> dict:
+        if self._priv_key and self.api_key:
+            import base64
+            timestamp = str(int(time.time()))
+            payload = f"{timestamp}{method.upper()}{full_path}{body}".encode()
+            sig = self._priv_key.sign(payload)
+            sig_b64 = base64.urlsafe_b64encode(sig).decode()
+            return {
+                "Nobitex-Key": self.api_key,
+                "Nobitex-Signature": sig_b64,
+                "Nobitex-Timestamp": timestamp,
+                "Content-Type": "application/json",
+                "User-Agent": "ArbitBot/CryptoArbitrage-2.0",
+            }
         return {
             "Authorization": f"Token {self.api_key}",
+            "Content-Type": "application/json",
             "User-Agent": "ArbitBot/CryptoArbitrage-2.0",
         }
 
     async def get_balance(self, client: httpx.AsyncClient, currency: str) -> float:
-        if self.dry_run or not self.api_key:
+        if not self.api_key:
             return 1000.0  # Simulated paper balance
 
-        url = f"{self.base_url}/users/wallets/list"
-        res = await client.post(url, headers=self._headers(), timeout=5.0)
+        path = "/users/wallets/list"
+        url = f"{self.base_url}{path}"
+        headers = self._headers(method="POST", full_path=path, body="")
+        res = await client.post(url, headers=headers, timeout=5.0)
         res.raise_for_status()
         data = res.json()
 
@@ -83,11 +111,13 @@ class NobitexClient(ExchangeClient):
         return 0.0
 
     async def get_all_balances(self, client: httpx.AsyncClient) -> Dict[str, float]:
-        if self.dry_run or not self.api_key:
+        if not self.api_key:
             return {"USDT": 1000.0, "BTC": 0.05, "ETH": 0.5}
 
-        url = f"{self.base_url}/users/wallets/list"
-        res = await client.post(url, headers=self._headers(), timeout=5.0)
+        path = "/users/wallets/list"
+        url = f"{self.base_url}{path}"
+        headers = self._headers(method="POST", full_path=path, body="")
+        res = await client.post(url, headers=headers, timeout=5.0)
         res.raise_for_status()
         data = res.json()
         balances = {}
@@ -118,7 +148,8 @@ class NobitexClient(ExchangeClient):
                 timestamp=now,
             )
 
-        url = f"{self.base_url}/market/orders/add"
+        path = "/market/orders/add"
+        url = f"{self.base_url}{path}"
         payload = {
             "type": req.side.lower(),
             "execution": "market" if req.order_type == "market" else "limit",
@@ -129,8 +160,12 @@ class NobitexClient(ExchangeClient):
         if req.order_type == "limit":
             payload["price"] = str(int(req.price) if req.price >= 100 else f"{req.price:.6f}")
 
+        import json
+        body = json.dumps(payload, separators=(',', ':'))
+        headers = self._headers(method="POST", full_path=path, body=body)
+
         try:
-            res = await client.post(url, json=payload, headers=self._headers(), timeout=5.0)
+            res = await client.post(url, content=body, headers=headers, timeout=5.0)
             data = res.json()
             if data.get("status") == "ok":
                 order_info = data.get("order", {})
@@ -183,7 +218,7 @@ class BitpinClient(ExchangeClient):
         }
 
     async def get_balance(self, client: httpx.AsyncClient, currency: str) -> float:
-        if self.dry_run or not self.api_key:
+        if not self.api_key:
             return 1000.0
 
         url = f"{self.base_url}/v1/wlt/wallets/"
@@ -200,7 +235,7 @@ class BitpinClient(ExchangeClient):
         return 0.0
 
     async def get_all_balances(self, client: httpx.AsyncClient) -> Dict[str, float]:
-        if self.dry_run or not self.api_key:
+        if not self.api_key:
             return {"USDT": 1000.0, "BTC": 0.05, "ETH": 0.5}
 
         url = f"{self.base_url}/v1/wlt/wallets/"
@@ -298,7 +333,7 @@ class WallexClient(ExchangeClient):
         }
 
     async def get_balance(self, client: httpx.AsyncClient, currency: str) -> float:
-        if self.dry_run or not self.api_key:
+        if not self.api_key:
             return 1000.0
 
         url = f"{self.base_url}/v1/account/balances"
@@ -313,7 +348,7 @@ class WallexClient(ExchangeClient):
         return max(0.0, val - locked)
 
     async def get_all_balances(self, client: httpx.AsyncClient) -> Dict[str, float]:
-        if self.dry_run or not self.api_key:
+        if not self.api_key:
             return {"USDT": 1000.0, "BTC": 0.05, "ETH": 0.5}
 
         url = f"{self.base_url}/v1/account/balances"

@@ -130,7 +130,12 @@ async def main():
         print("📱 Telegram Bot: DISABLED (Set TELEGRAM_BOT_TOKEN in .env)")
 
     # 2. Initialize Exchange Clients
-    nobitex_client = NobitexClient(token=config.nobitex_api_token, dry_run=config.dry_run)
+    nobitex_client = NobitexClient(
+        token=config.nobitex_api_token,
+        api_key=config.nobitex_api_key,
+        secret_key=config.nobitex_secret_key,
+        dry_run=config.dry_run,
+    )
     bitpin_client = BitpinClient(api_key=config.bitpin_api_key, dry_run=config.dry_run)
     wallex_client = WallexClient(api_key=config.wallex_api_key, dry_run=config.dry_run)
 

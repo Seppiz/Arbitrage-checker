@@ -193,26 +193,28 @@ class TelegramBot:
 
                 elif text == "/balance":
                     if not is_admin:
-                        await self.send_message(client, chat_id, "⛔ <b>Access Denied:</b> Balances are restricted to administrator accounts.")
+                        await self.send_message(client, chat_id, "⛔ <b>Access Denied:</b> دسترسی به موجودی حساب تنها برای ادمین مجاز است.")
                         continue
-                    await self.send_message(client, chat_id, "⏳ Fetching balances from Nobitex, Bitpin, and Wallex...")
+                    await self.send_message(client, chat_id, "⏳ در حال استعلام موجودی از نوبیتکس، بیت‌پین و والکس...")
                     nob_bals, bp_bals, wlx_bals = await asyncio.gather(
                         nobitex.get_all_balances(client),
                         bitpin.get_all_balances(client),
                         wallex.get_all_balances(client),
                         return_exceptions=True,
                     )
-                    def fmt_bals(bals, name):
+                    def fmt_bals(bals, name, has_key):
+                        if not has_key:
+                            return f"🏛 <b>{name}</b>:\n  ⚠️ <i>کلید API در .env وارد نشده (موجودی شبیه‌سازی تستی):</i>\n  • USDT: 1,000.00"
                         if isinstance(bals, dict):
                             top_items = [f"{k}: {v:,.4g}" for k, v in list(bals.items())[:8]]
-                            return f"🏛 <b>{name}</b>:\n" + ("\n".join(f"  • {i}" for i in top_items) if top_items else "  • (Empty)")
-                        return f"🏛 <b>{name}</b>: Error {bals}"
+                            return f"🏛 <b>{name}</b>:\n" + ("\n".join(f"  • {i}" for i in top_items) if top_items else "  • (کیف‌پول خالی است)")
+                        return f"🏛 <b>{name}</b>: خطا در استعلام: {bals}"
 
                     msg_bal = (
-                        "💼 <b>Exchange Balances:</b>\n\n"
-                        f"{fmt_bals(nob_bals, 'Nobitex')}\n\n"
-                        f"{fmt_bals(bp_bals, 'Bitpin')}\n\n"
-                        f"{fmt_bals(wlx_bals, 'Wallex')}"
+                        "💼 <b>موجودی حساب شما در صرافی‌ها:</b>\n\n"
+                        f"{fmt_bals(nob_bals, 'Nobitex (نوبیتکس)', bool(nobitex.api_key))}\n\n"
+                        f"{fmt_bals(bp_bals, 'Bitpin (بیت‌پین)', bool(bitpin.api_key))}\n\n"
+                        f"{fmt_bals(wlx_bals, 'Wallex (والکس)', bool(wallex.api_key))}"
                     )
                     await self.send_message(client, chat_id, msg_bal)
 
