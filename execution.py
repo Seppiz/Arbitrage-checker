@@ -1,10 +1,25 @@
 import asyncio
+import sys
 import time
 from typing import Callable, Dict, Optional
 import httpx
 from models import Opportunity, OrderRequest, OrderResult
 from exchanges import ExchangeClient, NobitexClient, BitpinClient, WallexClient
 from config import config
+
+if sys.platform == "win32":
+    try:
+        sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+        sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+    except Exception:
+        pass
+
+
+def safe_print(*args, **kwargs):
+    try:
+        print(*args, **kwargs)
+    except Exception:
+        pass
 
 
 class ArbitrageExecutor:
@@ -60,7 +75,7 @@ class ArbitrageExecutor:
                 try:
                     usdt_bal = await buy_client.get_balance(client, "usdt")
                     if usdt_bal < config.trade_amount_usdt:
-                        print(
+                        safe_print(
                             f"⚠️ [Skipped Trade] Insufficient USDT on {opp.buy_exchange.upper()}: "
                             f"Available {usdt_bal:.2f} < Required {config.trade_amount_usdt:.2f}",
                             flush=True,
@@ -69,14 +84,14 @@ class ArbitrageExecutor:
 
                     coin_bal = await sell_client.get_balance(client, opp.symbol)
                     if coin_bal < opp.coin_amount:
-                        print(
+                        safe_print(
                             f"⚠️ [Skipped Trade] Insufficient {opp.symbol} on {opp.sell_exchange.upper()}: "
                             f"Available {coin_bal:.4f} < Required {opp.coin_amount:.4f}",
                             flush=True,
                         )
                         return
                 except Exception as e:
-                    print(f"❌ [Balance Check Error]: {e}", flush=True)
+                    safe_print(f"❌ [Balance Check Error]: {e}", flush=True)
                     return
 
             # 4. Prepare Order Requests with Max Slippage Protection
@@ -102,9 +117,9 @@ class ArbitrageExecutor:
             )
 
             mode_str = "🧪 [SIMULATED / DRY-RUN]" if config.dry_run else "⚡ [LIVE TRADE]"
-            print(f"\n{mode_str} Executing Arbitrage on {opp.symbol}:", flush=True)
-            print(f"  • BUY {opp.coin_amount:,.6g} {opp.symbol} on {opp.buy_exchange.upper()} @ Max {max_buy_price:,.6g}", flush=True)
-            print(f"  • SELL {opp.coin_amount:,.6g} {opp.symbol} on {opp.sell_exchange.upper()} @ Min {min_sell_price:,.6g}", flush=True)
+            safe_print(f"\n{mode_str} Executing Arbitrage on {opp.symbol}:", flush=True)
+            safe_print(f"  • BUY {opp.coin_amount:,.6g} {opp.symbol} on {opp.buy_exchange.upper()} @ Max {max_buy_price:,.6g}", flush=True)
+            safe_print(f"  • SELL {opp.coin_amount:,.6g} {opp.symbol} on {opp.sell_exchange.upper()} @ Min {min_sell_price:,.6g}", flush=True)
 
             # 5. Concurrent Order Execution via asyncio.gather
             start_t = time.time()
@@ -153,7 +168,7 @@ class ArbitrageExecutor:
                     f"<b>Total Session Profit:</b> {self.total_realized_profit_usdt:+.2f} USDT ({self.total_trades_count} trades)"
                     f"{fill_discrepancy_msg}"
                 )
-                print(f"✅ {mode_str} Completed in {elapsed_ms:.1f}ms! Net Profit: +{opp.net_profit_usdt:.2f} USDT\n", flush=True)
+                safe_print(f"✅ {mode_str} Completed in {elapsed_ms:.1f}ms! Net Profit: +{opp.net_profit_usdt:.2f} USDT\n", flush=True)
 
                 if self.on_trade_executed:
                     self.on_trade_executed(receipt)
@@ -200,6 +215,6 @@ class ArbitrageExecutor:
                     f"<b>Sell ({opp.sell_exchange.upper()}):</b> {'OK' if sell_res and sell_res.success else f'ERR: {sell_res.error if sell_res else results[1]}'}"
                     f"{rollback_msg}"
                 )
-                print(f"❌ Execution failed: {err_msg}", flush=True)
+                safe_print(f"❌ Execution failed: {err_msg}", flush=True)
                 if self.on_trade_executed:
                     self.on_trade_executed(err_msg)

@@ -99,6 +99,9 @@ class TelegramBot:
         }
         try:
             res = await client.post(url, json=payload, timeout=5.0)
+            if res.status_code == 400 and "can't parse entities" in res.text:
+                payload.pop("parse_mode", None)
+                res = await client.post(url, json=payload, timeout=5.0)
             res.raise_for_status()
             return True
         except Exception as e:

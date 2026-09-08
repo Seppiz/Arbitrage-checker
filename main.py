@@ -8,8 +8,8 @@ import httpx
 # Configure UTF-8 encoding on Windows to support emojis and symbols
 if sys.platform == "win32":
     try:
-        sys.stdout.reconfigure(encoding="utf-8")
-        sys.stderr.reconfigure(encoding="utf-8")
+        sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+        sys.stderr.reconfigure(encoding="utf-8", errors="replace")
     except Exception:
         pass
 
@@ -137,7 +137,7 @@ async def main():
     async with httpx.AsyncClient(timeout=10.0) as http_client:
         # 3. Initialize Execution Engine
         def on_trade_receipt(receipt: str):
-            asyncio.create_task(bot.broadcast(http_client, receipt, admin_only=True))
+            asyncio.create_task(bot.broadcast(http_client, receipt))
 
         executor = ArbitrageExecutor(
             nobitex=nobitex_client,
@@ -148,6 +148,7 @@ async def main():
 
         # 4. Opportunity Callback from Real-Time Streamers
         last_console_log: dict = {}
+        last_tg_alert: dict = {}
 
         def on_opportunity_detected(opp: Opportunity):
             now = time.time()
@@ -155,13 +156,32 @@ async def main():
             if now - last_console_log.get(opp.symbol, 0) >= 5.0:
                 last_console_log[opp.symbol] = now
                 now_str = datetime.now().strftime("%H:%M:%S")
-                print(
-                    f"\n🔥 [{now_str}] LIVE ARBITRAGE: {opp.symbol} | {opp.buy_exchange.upper()} -> {opp.sell_exchange.upper()} "
-                    f"| Spread: {opp.spread_pct:+.2f}% | Net Profit: +{opp.net_profit_usdt:.2f} USDT (+{opp.roi_pct:.2f}% ROI)",
-                    flush=True,
-                )
-            # Dispatch execution to executor (which manages its own strict cooldown & filters)
-            asyncio.create_task(executor.execute_opportunity(opp, http_client))
+                try:
+                    print(
+                        f"\n🔥 [{now_str}] LIVE ARBITRAGE: {opp.symbol} | {opp.buy_exchange.upper()} -> {opp.sell_exchange.upper()} "
+                        f"| Spread: {opp.spread_pct:+.2f}% | Net Profit: +{opp.net_profit_usdt:.2f} USDT (+{opp.roi_pct:.2f}% ROI)",
+                        flush=True,
+                    )
+                except Exception:
+                    pass
+
+            # Throttle Telegram alerts per symbol (every trade_cooldown_seconds, min 15s)
+            tg_cooldown = max(15, config.trade_cooldown_seconds)
+            if now - last_tg_alert.get(opp.symbol, 0) >= tg_cooldown:
+                last_tg_alert[opp.symbol] = now
+                asyncio.create_task(bot.broadcast(http_client, opp.format_details()))
+
+            # Safely dispatch execution to executor (which manages its own strict cooldown & filters)
+            async def safe_execute():
+                try:
+                    await executor.execute_opportunity(opp, http_client)
+                except Exception as e:
+                    try:
+                        print(f"❌ Execution error on {opp.symbol}: {e}", flush=True)
+                    except Exception:
+                        pass
+
+            asyncio.create_task(safe_execute())
 
         # 5. Initialize OrderBook Cache & Streamers
         cache = OrderBookCache(
