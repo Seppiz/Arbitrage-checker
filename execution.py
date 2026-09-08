@@ -133,11 +133,47 @@ class ArbitrageExecutor:
             if self.on_trade_executed:
                 self.on_trade_executed(receipt)
         else:
+            # Check for dangerous One-Legged Execution (one side succeeded, other side failed)
+            rollback_msg = ""
+            if config.enable_auto_rollback:
+                if buy_res and buy_res.success and (not sell_res or not sell_res.success):
+                    # Buy filled, but Sell failed -> Immediately unwind by dumping bought coins on buy_exchange to recover USDT
+                    unwind_req = OrderRequest(
+                        exchange=opp.buy_exchange,
+                        symbol=opp.symbol,
+                        side="sell",
+                        amount=buy_res.filled_amount or opp.coin_amount,
+                        price=opp.buy_price * 0.98,
+                        order_type="market",
+                    )
+                    unwind_res = await buy_client.place_order(client, unwind_req)
+                    if unwind_res.success:
+                        rollback_msg = f"\n\n🛡️ <b>EMERGENCY ROLLBACK SUCCESSFUL:</b> Sold back {unwind_req.amount} {opp.symbol} on {opp.buy_exchange.upper()} to recover USDT. Exposure closed."
+                    else:
+                        rollback_msg = f"\n\n🚨 <b>ROLLBACK FAILED:</b> Could not sell back on {opp.buy_exchange.upper()}: {unwind_res.error}. MANUAL ATTENTION REQUIRED!"
+
+                elif sell_res and sell_res.success and (not buy_res or not buy_res.success):
+                    # Sell filled, but Buy failed -> Immediately unwind by rebuying coins on sell_exchange
+                    unwind_req = OrderRequest(
+                        exchange=opp.sell_exchange,
+                        symbol=opp.symbol,
+                        side="buy",
+                        amount=sell_res.filled_amount or opp.coin_amount,
+                        price=opp.sell_price * 1.02,
+                        order_type="market",
+                    )
+                    unwind_res = await sell_client.place_order(client, unwind_req)
+                    if unwind_res.success:
+                        rollback_msg = f"\n\n🛡️ <b>EMERGENCY ROLLBACK SUCCESSFUL:</b> Re-bought {unwind_req.amount} {opp.symbol} on {opp.sell_exchange.upper()} to restore inventory. Exposure closed."
+                    else:
+                        rollback_msg = f"\n\n🚨 <b>ROLLBACK FAILED:</b> Could not re-buy on {opp.sell_exchange.upper()}: {unwind_res.error}. MANUAL ATTENTION REQUIRED!"
+
             err_msg = (
                 f"⚠️ <b>ARBITRAGE EXECUTION FAILED / PARTIAL</b>\n\n"
                 f"<b>Asset:</b> {opp.symbol}\n"
                 f"<b>Buy ({opp.buy_exchange.upper()}):</b> {'OK' if buy_res and buy_res.success else f'ERR: {buy_res.error if buy_res else results[0]}'}\n"
                 f"<b>Sell ({opp.sell_exchange.upper()}):</b> {'OK' if sell_res and sell_res.success else f'ERR: {sell_res.error if sell_res else results[1]}'}"
+                f"{rollback_msg}"
             )
             print(f"❌ Execution failed: {err_msg}", flush=True)
             if self.on_trade_executed:

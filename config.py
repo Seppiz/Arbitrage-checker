@@ -39,11 +39,14 @@ class BotConfig:
     # Trading & Execution Settings
     # DRY_RUN is True by default for safety! Toggle to False only when ready for live execution.
     dry_run: bool = os.getenv("DRY_RUN", "true").lower() in ("true", "1", "yes")
-    trade_amount_usdt: float = float(os.getenv("TRADE_AMOUNT_USDT", "100.0"))
-    min_profit_usdt: float = float(os.getenv("MIN_PROFIT_USDT", "0.20"))
+    trade_amount_usdt: float = float(os.getenv("TRADE_AMOUNT_USDT", "5.0"))
+    min_profit_usdt: float = float(os.getenv("MIN_PROFIT_USDT", "0.01"))
     min_roi_pct: float = float(os.getenv("MIN_ROI_PCT", "0.35"))
     max_slippage_pct: float = float(os.getenv("MAX_SLIPPAGE_PCT", "0.30"))
     trade_cooldown_seconds: int = int(os.getenv("TRADE_COOLDOWN_SECONDS", "30"))
+    max_quote_age_seconds: float = float(os.getenv("MAX_QUOTE_AGE_SECONDS", "2.0"))
+    enable_auto_rollback: bool = os.getenv("ENABLE_AUTO_ROLLBACK", "true").lower() in ("true", "1", "yes")
+    require_sufficient_depth: bool = os.getenv("REQUIRE_SUFFICIENT_DEPTH", "true").lower() in ("true", "1", "yes")
 
     # Coin list and fees
     symbols: List[str] = field(default_factory=lambda: DEFAULT_SYMBOLS)

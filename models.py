@@ -76,13 +76,24 @@ def evaluate_arbitrage(
     capital_usdt: float,
     buy_fee_pct: float,
     sell_fee_pct: float,
-    require_depth: bool = False,
+    require_depth: bool = True,
+    max_age_seconds: float = 2.5,
 ) -> Opportunity | None:
     """
     Evaluates arbitrage opportunity between two quotes using user's exact formula from main.py.
-    Optionally checks orderbook depth to protect against slippage.
+    Protects against:
+    1. Invalid or inverted prices
+    2. Stale quotes (quotes older than max_age_seconds)
+    3. Thin orderbook depth (insufficient liquidity causing slippage)
     """
     if not buy.is_valid() or not sell.is_valid():
+        return None
+
+    now = time.time()
+    # 1. Staleness Check: Reject quotes older than max_age_seconds
+    if buy.timestamp > 0 and (now - buy.timestamp) > max_age_seconds:
+        return None
+    if sell.timestamp > 0 and (now - sell.timestamp) > max_age_seconds:
         return None
 
     buy_fee_rate = buy_fee_pct / 100.0
@@ -102,11 +113,12 @@ def evaluate_arbitrage(
     total_fees_usdt = buy_fee_usdt + sell_fee_usdt
 
     if net_profit_usdt > 0:
-        # Check depth if volume information is present
+        # 2. Strict Orderbook Depth Check: Ensure top-of-book volume covers required trade capital
         has_depth = True
-        if buy.ask_volume > 0 and buy.ask_volume < coin_bought * 0.8:
+        min_required_usd = capital_usdt * 0.95
+        if buy.ask_volume > 0 and (buy.ask_volume * buy.ask) < min_required_usd:
             has_depth = False
-        if sell.bid_volume > 0 and sell.bid_volume < coin_bought * 0.8:
+        if sell.bid_volume > 0 and (sell.bid_volume * sell.bid) < min_required_usd:
             has_depth = False
 
         if require_depth and not has_depth:

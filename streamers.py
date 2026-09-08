@@ -56,7 +56,8 @@ class OrderBookCache:
                     capital_usdt=config.trade_amount_usdt,
                     buy_fee_pct=self.fees_percent.get(buy_ex, 0.15),
                     sell_fee_pct=self.fees_percent.get(sell_ex, 0.15),
-                    require_depth=False,
+                    require_depth=config.require_sufficient_depth,
+                    max_age_seconds=config.max_quote_age_seconds,
                 )
                 if opp and opp.net_profit_usdt > 0:
                     if self.on_opportunity:

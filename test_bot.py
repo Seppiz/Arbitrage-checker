@@ -39,6 +39,22 @@ def test_precisions():
     print("✅ Precision rounding verified!")
 
 
+def test_staleness_and_depth():
+    print("Testing staleness timeout and orderbook depth protection...")
+    now = time.time()
+
+    # 1. Test Staleness: Quote older than 2.5 seconds must be rejected
+    stale_q = Quote(exchange="nobitex", symbol="BTC", bid=99.0, ask=100.0, bid_volume=10.0, ask_volume=10.0, timestamp=now - 5.0)
+    fresh_q = Quote(exchange="bitpin", symbol="BTC", bid=102.0, ask=103.0, bid_volume=10.0, ask_volume=10.0, timestamp=now)
+    assert evaluate_arbitrage(stale_q, fresh_q, capital_usdt=5.0, buy_fee_pct=0.15, sell_fee_pct=0.15, max_age_seconds=2.0) is None
+    print("  • Stale quote correctly rejected! ✅")
+
+    # 2. Test Thin Orderbook Depth: Volume of only 1 USDT when capital is 5 USDT must be rejected
+    thin_q = Quote(exchange="nobitex", symbol="BTC", bid=99.0, ask=100.0, bid_volume=0.01, ask_volume=0.01, timestamp=now)  # 0.01 * 100 = 1 USDT < 5 USDT
+    assert evaluate_arbitrage(thin_q, fresh_q, capital_usdt=5.0, buy_fee_pct=0.15, sell_fee_pct=0.15, require_depth=True) is None
+    print("  • Thin orderbook correctly rejected to prevent slippage! ✅")
+
+
 async def test_execution():
     print("Testing dry-run simulated execution...")
     nob = NobitexClient(dry_run=True)
@@ -116,6 +132,7 @@ async def test_subscriber_manager():
 async def main():
     test_models()
     test_precisions()
+    test_staleness_and_depth()
     test_cache()
     await test_execution()
     await test_subscriber_manager()
