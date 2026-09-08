@@ -85,7 +85,7 @@ class NobitexWebSocket:
         while self.running:
             try:
                 print(f"🌐 [Nobitex WS] Connecting to {self.uri}...", flush=True)
-                async with websockets.connect(self.uri, ping_interval=20, ping_timeout=10, open_timeout=10) as ws:
+                async with websockets.connect(self.uri, proxy=None, ping_interval=20, ping_timeout=10, open_timeout=15) as ws:
                     # 1. Connect handshake
                     await ws.send(json.dumps({"id": 1, "connect": {}}))
                     await ws.recv()
@@ -172,7 +172,7 @@ class BitpinWebSocket:
         while self.running:
             try:
                 print(f"🌐 [Bitpin WS] Connecting to {self.uri}...", flush=True)
-                async with websockets.connect(self.uri, ping_interval=20, ping_timeout=10, open_timeout=10) as ws:
+                async with websockets.connect(self.uri, proxy=None, ping_interval=20, ping_timeout=10, open_timeout=15) as ws:
                     # 1. Connect handshake
                     await ws.send(json.dumps({"id": 1, "connect": {}}))
                     await ws.recv()
