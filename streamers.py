@@ -18,13 +18,14 @@ class OrderBookCache:
         symbols: List[str],
         fees_percent: Dict[str, float],
         on_opportunity_cb: Optional[Callable[[Opportunity], None]] = None,
+        exchanges: Optional[List[str]] = None,
     ):
         self.symbols = [s.upper() for s in symbols]
         self.fees_percent = fees_percent
         self.on_opportunity = on_opportunity_cb
         # quotes[symbol][exchange] = Quote
         self.quotes: Dict[str, Dict[str, Quote]] = {s: {} for s in self.symbols}
-        self.exchanges = ["nobitex", "bitpin", "wallex"]
+        self.exchanges = [ex.lower() for ex in exchanges] if exchanges else ["nobitex", "wallex"]
 
     def update_quote(self, quote: Quote):
         sym = quote.symbol.upper()

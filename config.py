@@ -53,6 +53,11 @@ class BotConfig:
     # Coin list and fees
     symbols: List[str] = field(default_factory=lambda: DEFAULT_SYMBOLS)
     fees_percent: Dict[str, float] = field(default_factory=lambda: DEFAULT_FEES_PERCENT)
+    enabled_exchanges: List[str] = field(
+        default_factory=lambda: [
+            ex.strip().lower() for ex in os.getenv("ENABLED_EXCHANGES", "nobitex,wallex").split(",") if ex.strip()
+        ]
+    )
 
 
 config = BotConfig()

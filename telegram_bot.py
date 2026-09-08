@@ -181,6 +181,7 @@ class TelegramBot:
                         f"📊 <b>Arbitrage Bot Status</b>\n\n"
                         f"• Engine: {halt_status}\n"
                         f"• Mode: {mode}\n"
+                        f"• Active Exchanges: {', '.join(ex.upper() for ex in config.enabled_exchanges)}\n"
                         f"• Monitored Coins: {len(config.symbols)}\n"
                         f"• Capital per Trade: {config.trade_amount_usdt:,.0f} USDT\n"
                         f"• Min Profit: {config.min_profit_usdt:.2f} USDT (Min {config.min_roi_pct:.2f}% ROI)\n"
@@ -195,13 +196,23 @@ class TelegramBot:
                     if not is_admin:
                         await self.send_message(client, chat_id, "⛔ <b>Access Denied:</b> دسترسی به موجودی حساب تنها برای ادمین مجاز است.")
                         continue
-                    await self.send_message(client, chat_id, "⏳ در حال استعلام موجودی از نوبیتکس، بیت‌پین و والکس...")
-                    nob_bals, bp_bals, wlx_bals = await asyncio.gather(
-                        nobitex.get_all_balances(client),
-                        bitpin.get_all_balances(client),
-                        wallex.get_all_balances(client),
-                        return_exceptions=True,
-                    )
+                    active_names = [ex.capitalize() for ex in config.enabled_exchanges]
+                    await self.send_message(client, chat_id, f"⏳ در حال استعلام موجودی از {', '.join(active_names)}...")
+
+                    calls = []
+                    call_names = []
+                    if "nobitex" in config.enabled_exchanges:
+                        calls.append(nobitex.get_all_balances(client))
+                        call_names.append(("Nobitex (نوبیتکس)", bool(nobitex.api_key)))
+                    if "wallex" in config.enabled_exchanges:
+                        calls.append(wallex.get_all_balances(client))
+                        call_names.append(("Wallex (والکس)", bool(wallex.api_key)))
+                    if "bitpin" in config.enabled_exchanges:
+                        calls.append(bitpin.get_all_balances(client))
+                        call_names.append(("Bitpin (بیت‌پین)", bool(bitpin.api_key)))
+
+                    results = await asyncio.gather(*calls, return_exceptions=True)
+
                     def fmt_bals(bals, name, has_key):
                         if not has_key:
                             return f"🏛 <b>{name}</b>:\n  ⚠️ <i>کلید API در .env وارد نشده (موجودی شبیه‌سازی تستی):</i>\n  • USDT: 1,000.00"
@@ -210,12 +221,8 @@ class TelegramBot:
                             return f"🏛 <b>{name}</b>:\n" + ("\n".join(f"  • {i}" for i in top_items) if top_items else "  • (کیف‌پول خالی است)")
                         return f"🏛 <b>{name}</b>: خطا در استعلام: {bals}"
 
-                    msg_bal = (
-                        "💼 <b>موجودی حساب شما در صرافی‌ها:</b>\n\n"
-                        f"{fmt_bals(nob_bals, 'Nobitex (نوبیتکس)', bool(nobitex.api_key))}\n\n"
-                        f"{fmt_bals(bp_bals, 'Bitpin (بیت‌پین)', bool(bitpin.api_key))}\n\n"
-                        f"{fmt_bals(wlx_bals, 'Wallex (والکس)', bool(wallex.api_key))}"
-                    )
+                    bal_sections = [fmt_bals(res, name, has_key) for res, (name, has_key) in zip(results, call_names)]
+                    msg_bal = "💼 <b>موجودی حساب شما در صرافی‌های فعال:</b>\n\n" + "\n\n".join(bal_sections)
                     await self.send_message(client, chat_id, msg_bal)
 
                 elif text.startswith("/dryrun") and is_admin:

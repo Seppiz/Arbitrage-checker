@@ -107,7 +107,7 @@ async def main():
     print("=" * 80)
     print("🚀 REAL-TIME WEBSOCKET ARBITRAGE & AUTO-EXECUTION BOT")
     print("=" * 80)
-    print(f"📊 Monitored Symbols: {len(config.symbols)} coins across Nobitex, Bitpin, and Wallex")
+    print(f"📊 Monitored Symbols: {len(config.symbols)} coins across {', '.join(ex.upper() for ex in config.enabled_exchanges)}")
     print(f"💰 Capital per Trade: {config.trade_amount_usdt:,.2f} USDT")
     print(f"🎯 Min Profit Target: {config.min_profit_usdt:.2f} USDT (Min {config.min_roi_pct:.2f}% ROI)")
     print(f"🛡️ Safety Mode: {'🧪 DRY-RUN (Paper Simulation)' if config.dry_run else '⚡ LIVE TRADING (Real Execution)'}")
@@ -187,29 +187,29 @@ async def main():
             symbols=config.symbols,
             fees_percent=config.fees_percent,
             on_opportunity_cb=on_opportunity_detected,
+            exchanges=config.enabled_exchanges,
         )
 
-        nobitex_ws = NobitexWebSocket(cache, config.symbols)
-        bitpin_ws = BitpinWebSocket(cache, config.symbols)
-        wallex_streamer = WallexStreamer(cache, config.symbols, interval=1.5)
+        tasks = []
+        if "nobitex" in config.enabled_exchanges:
+            nobitex_ws = NobitexWebSocket(cache, config.symbols)
+            tasks.append(asyncio.create_task(nobitex_ws.run()))
+        if "bitpin" in config.enabled_exchanges:
+            bitpin_ws = BitpinWebSocket(cache, config.symbols)
+            tasks.append(asyncio.create_task(bitpin_ws.run()))
+        if "wallex" in config.enabled_exchanges:
+            wallex_streamer = WallexStreamer(cache, config.symbols, interval=1.5)
+            tasks.append(asyncio.create_task(wallex_streamer.run(http_client)))
+
+        tasks.append(asyncio.create_task(telegram_polling_loop(bot, executor, nobitex_client, bitpin_client, wallex_client, http_client)))
 
         print("=" * 80)
-        print("🚀 Starting real-time WebSocket streams and trading engine...\n", flush=True)
-
-        tasks = [
-            asyncio.create_task(nobitex_ws.run()),
-            asyncio.create_task(bitpin_ws.run()),
-            asyncio.create_task(wallex_streamer.run(http_client)),
-            asyncio.create_task(telegram_polling_loop(bot, executor, nobitex_client, bitpin_client, wallex_client, http_client)),
-        ]
+        print(f"🚀 Starting streams for: {', '.join(ex.upper() for ex in config.enabled_exchanges)}...\n", flush=True)
 
         try:
             await asyncio.gather(*tasks)
         except (KeyboardInterrupt, asyncio.CancelledError):
             print("\n👋 Shutting down arbitrage bot cleanly...")
-            nobitex_ws.running = False
-            bitpin_ws.running = False
-            wallex_streamer.running = False
             for t in tasks:
                 t.cancel()
 
