@@ -80,12 +80,12 @@ class NobitexClient(ExchangeClient):
                 "Nobitex-Signature": sig_b64,
                 "Nobitex-Timestamp": timestamp,
                 "Content-Type": "application/json",
-                "User-Agent": "ArbitBot/CryptoArbitrage-2.0",
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
             }
         return {
             "Authorization": f"Token {self.api_key}",
             "Content-Type": "application/json",
-            "User-Agent": "ArbitBot/CryptoArbitrage-2.0",
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
         }
 
     async def get_balance(self, client: httpx.AsyncClient, currency: str) -> float:
@@ -329,7 +329,7 @@ class WallexClient(ExchangeClient):
         return {
             "x-api-key": self.api_key,
             "Content-Type": "application/json",
-            "User-Agent": "ArbitBot/CryptoArbitrage-2.0",
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
         }
 
     async def get_balance(self, client: httpx.AsyncClient, currency: str) -> float:
@@ -363,6 +363,24 @@ class WallexClient(ExchangeClient):
                 balances[curr.upper()] = avail
         return balances
 
+    async def _ensure_markets(self, client: httpx.AsyncClient):
+        if not hasattr(self, "_market_rules") or not self._market_rules:
+            self._market_rules = {}
+            try:
+                res = await client.get(f"{self.base_url}/v1/markets", timeout=5.0)
+                if res.status_code == 200:
+                    symbols = res.json().get("result", {}).get("symbols", {})
+                    for s_name, s_info in symbols.items():
+                        self._market_rules[s_name.upper()] = {
+                            "stepSize": int(s_info.get("stepSize", 2)),
+                            "tickSize": int(s_info.get("tickSize", 4)),
+                            "minQty": float(s_info.get("minQty", 0.0001)),
+                            "minNotional": float(s_info.get("minNotional", 1.0)),
+                            "isMarketTypeEnable": bool(s_info.get("isMarketTypeEnable", False)),
+                        }
+            except Exception:
+                pass
+
     async def place_order(self, client: httpx.AsyncClient, req: OrderRequest) -> OrderResult:
         rounded_qty = round_amount(req.symbol, req.amount)
         now = time.time()
@@ -381,15 +399,32 @@ class WallexClient(ExchangeClient):
                 timestamp=now,
             )
 
+        await self._ensure_markets(client)
+        s_key = f"{req.symbol.upper()}USDT"
+        rules = getattr(self, "_market_rules", {}).get(s_key, {})
+        step = rules.get("stepSize", DEFAULT_PRECISIONS.get(req.symbol.upper(), 2))
+        tick = rules.get("tickSize", 4)
+
+        d_qty = Decimal(str(req.amount)).quantize(Decimal(f"1e-{step}") if step > 0 else Decimal("1"), rounding=ROUND_DOWN)
+        qty_str = f"{d_qty:f}" if step > 0 else str(int(d_qty))
+
+        d_price = Decimal(str(req.price)).quantize(Decimal(f"1e-{tick}") if tick > 0 else Decimal("1"), rounding=ROUND_DOWN)
+        price_str = f"{d_price:f}" if tick > 0 else str(int(d_price))
+
+        is_market_allowed = rules.get("isMarketTypeEnable", False)
+        order_type_str = "LIMIT"
+        if req.order_type == "market" and is_market_allowed:
+            order_type_str = "MARKET"
+
         url = f"{self.base_url}/v1/account/orders"
         payload = {
-            "symbol": f"{req.symbol.upper()}USDT",
-            "type": "LIMIT" if req.order_type == "limit" else "MARKET",
+            "symbol": s_key,
+            "type": order_type_str,
             "side": req.side.upper(),
-            "quantity": str(rounded_qty),
+            "quantity": qty_str,
         }
-        if req.order_type == "limit":
-            payload["price"] = str(req.price)
+        if order_type_str == "LIMIT" or req.price:
+            payload["price"] = price_str
 
         try:
             res = await client.post(url, json=payload, headers=self._headers(), timeout=5.0)

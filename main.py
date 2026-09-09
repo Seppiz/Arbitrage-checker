@@ -16,7 +16,7 @@ if sys.platform == "win32":
 from config import config, DEFAULT_SYMBOLS, DEFAULT_FEES_PERCENT
 from models import Quote, Opportunity, evaluate_arbitrage
 from exchanges import NobitexClient, BitpinClient, WallexClient
-from streamers import OrderBookCache, NobitexWebSocket, BitpinWebSocket, WallexStreamer
+from streamers import OrderBookCache, NobitexWebSocket, NobitexStreamer, BitpinWebSocket, WallexStreamer
 from execution import ArbitrageExecutor
 from telegram_bot import SubscriberManager, TelegramBot
 
@@ -139,10 +139,11 @@ async def main():
     bitpin_client = BitpinClient(api_key=config.bitpin_api_key, dry_run=config.dry_run)
     wallex_client = WallexClient(api_key=config.wallex_api_key, dry_run=config.dry_run)
 
-    async with httpx.AsyncClient(timeout=10.0) as http_client:
+    async with httpx.AsyncClient(timeout=10.0, trust_env=True) as tg_client, \
+               httpx.AsyncClient(timeout=10.0, trust_env=False) as exchange_client:
         # 3. Initialize Execution Engine
         def on_trade_receipt(receipt: str):
-            asyncio.create_task(bot.broadcast(http_client, receipt))
+            asyncio.create_task(bot.broadcast(tg_client, receipt))
 
         executor = ArbitrageExecutor(
             nobitex=nobitex_client,
@@ -153,6 +154,7 @@ async def main():
 
         # 4. Opportunity Callback from Real-Time Streamers
         last_console_log: dict = {}
+        last_tg_alert: dict = {}
 
         def on_opportunity_detected(opp: Opportunity):
             now = time.time()
@@ -169,11 +171,17 @@ async def main():
                 except Exception:
                     pass
 
+            # Broadcast opportunity alert to Telegram if meets minimum ROI and cooldown
+            if opp.roi_pct >= config.min_roi_pct and opp.net_profit_usdt >= config.min_profit_usdt:
+                tg_cooldown = max(15, config.trade_cooldown_seconds)
+                if now - last_tg_alert.get(opp.symbol, 0) >= tg_cooldown:
+                    last_tg_alert[opp.symbol] = now
+                    asyncio.create_task(bot.broadcast(tg_client, opp.format_details()))
 
             # Safely dispatch execution to executor (which manages its own strict cooldown & filters)
             async def safe_execute():
                 try:
-                    await executor.execute_opportunity(opp, http_client)
+                    await executor.execute_opportunity(opp, exchange_client)
                 except Exception as e:
                     try:
                         print(f"❌ Execution error on {opp.symbol}: {e}", flush=True)
@@ -192,6 +200,8 @@ async def main():
 
         tasks = []
         if "nobitex" in config.enabled_exchanges:
+            nobitex_streamer = NobitexStreamer(cache, config.symbols, interval=1.5)
+            tasks.append(asyncio.create_task(nobitex_streamer.run(exchange_client)))
             nobitex_ws = NobitexWebSocket(cache, config.symbols)
             tasks.append(asyncio.create_task(nobitex_ws.run()))
         if "bitpin" in config.enabled_exchanges:
@@ -199,9 +209,9 @@ async def main():
             tasks.append(asyncio.create_task(bitpin_ws.run()))
         if "wallex" in config.enabled_exchanges:
             wallex_streamer = WallexStreamer(cache, config.symbols, interval=1.5)
-            tasks.append(asyncio.create_task(wallex_streamer.run(http_client)))
+            tasks.append(asyncio.create_task(wallex_streamer.run(exchange_client)))
 
-        tasks.append(asyncio.create_task(telegram_polling_loop(bot, executor, nobitex_client, bitpin_client, wallex_client, http_client)))
+        tasks.append(asyncio.create_task(telegram_polling_loop(bot, executor, nobitex_client, bitpin_client, wallex_client, tg_client)))
 
         print("=" * 80)
         print(f"🚀 Starting streams for: {', '.join(ex.upper() for ex in config.enabled_exchanges)}...\n", flush=True)

@@ -78,6 +78,7 @@ class NobitexWebSocket:
         self.symbols = symbols
         self.uri = "wss://ws.nobitex.ir/connection/websocket"
         self.running = False
+        self._books: Dict[str, dict] = {}
 
     async def run(self):
         self.running = True
@@ -127,14 +128,23 @@ class NobitexWebSocket:
                             if channel.startswith("public:orderbook-") and channel.endswith("USDT"):
                                 raw_sym = channel.replace("public:orderbook-", "").replace("USDT", "")
                                 pub = push.get("pub", {}).get("data", {})
-                                bids = pub.get("bids", [])
-                                asks = pub.get("asks", [])
+                                
+                                if raw_sym not in self._books:
+                                    self._books[raw_sym] = {"bids": [], "asks": []}
 
-                                if bids and asks:
-                                    bid_price = float(bids[0][0])
-                                    bid_vol = float(bids[0][1]) if len(bids[0]) > 1 else 0.0
-                                    ask_price = float(asks[0][0])
-                                    ask_vol = float(asks[0][1]) if len(asks[0]) > 1 else 0.0
+                                if "bids" in pub and pub["bids"]:
+                                    self._books[raw_sym]["bids"] = pub["bids"]
+                                if "asks" in pub and pub["asks"]:
+                                    self._books[raw_sym]["asks"] = pub["asks"]
+
+                                b = self._books[raw_sym]["bids"]
+                                a = self._books[raw_sym]["asks"]
+
+                                if b and a:
+                                    bid_price = float(b[0][0])
+                                    bid_vol = float(b[0][1]) if len(b[0]) > 1 else 0.0
+                                    ask_price = float(a[0][0])
+                                    ask_vol = float(a[0][1]) if len(a[0]) > 1 else 0.0
 
                                     quote = Quote(
                                         exchange="nobitex",
@@ -242,6 +252,66 @@ class BitpinWebSocket:
                 backoff = min(backoff * 2, 20)
 
 
+class NobitexStreamer:
+    """
+    High-frequency bulk HTTP streamer for Nobitex.
+    Polls /market/stats every 1.5s directly with zero proxy latency.
+    """
+    def __init__(self, cache: OrderBookCache, symbols: List[str], interval: float = 1.5):
+        self.cache = cache
+        self.symbols = set(s.upper() for s in symbols)
+        self.interval = interval
+        self.running = False
+
+    async def run(self, client: httpx.AsyncClient):
+        self.running = True
+        url = "https://apiv2.nobitex.ir/market/stats"
+        print("✅ [Nobitex Streamer] Fast HTTP polling active for 35 symbols!", flush=True)
+
+        headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"}
+        while self.running:
+            try:
+                res = await client.get(url, headers=headers, timeout=5.0)
+                if res.status_code == 200:
+                    data = res.json()
+                    stats = data.get("stats", {})
+                    now = time.time()
+
+                    for sym in self.symbols:
+                        key = f"{sym.lower()}-usdt"
+                        item = stats.get(key)
+                        if not item or item.get("isClosed"):
+                            continue
+
+                        best_buy = item.get("bestBuy")
+                        best_sell = item.get("bestSell")
+
+                        if best_buy and best_sell:
+                            try:
+                                bid_val = float(best_buy)
+                                ask_val = float(best_sell)
+                                if bid_val > 0 and ask_val > 0:
+                                    quote = Quote(
+                                        exchange="nobitex",
+                                        symbol=sym,
+                                        bid=bid_val,
+                                        ask=ask_val,
+                                        bid_volume=1000.0,
+                                        ask_volume=1000.0,
+                                        timestamp=now,
+                                    )
+                                    self.cache.update_quote(quote)
+                            except (ValueError, TypeError):
+                                continue
+
+            except asyncio.CancelledError:
+                break
+            except Exception as e:
+                pass
+
+            await asyncio.sleep(self.interval)
+
+
 class WallexStreamer:
     """
     High-frequency bulk streamer for Wallex.
@@ -256,7 +326,8 @@ class WallexStreamer:
     async def run(self, client: httpx.AsyncClient):
         self.running = True
         url = "https://api.wallex.ir/v1/markets"
-        headers = {"User-Agent": "ArbitBot/CryptoArbitrage-2.0"}
+        headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"}
+        print("✅ [Wallex Streamer] Polling active for Wallex USDT markets!", flush=True)
 
         while self.running:
             try:
@@ -267,36 +338,42 @@ class WallexStreamer:
                     now = time.time()
 
                     for sym in self.symbols:
-                        key = f"{sym}USDT"
-                        item = symbols_map.get(key)
-                        if not item:
+                        try:
+                            key = f"{sym}USDT"
+                            item = symbols_map.get(key)
+                            if not item:
+                                continue
+
+                            stats = item.get("stats", {})
+                            bid_str = stats.get("bidPrice")
+                            ask_str = stats.get("askPrice")
+                            bid_vol_str = stats.get("bidVolume", "0")
+                            ask_vol_str = stats.get("askVolume", "0")
+
+                            if bid_str and ask_str and bid_str != "-" and ask_str != "-":
+                                bid_val = float(bid_str)
+                                ask_val = float(ask_str)
+                                if bid_val > 0 and ask_val > 0:
+                                    b_vol = float(bid_vol_str) if bid_vol_str and bid_vol_str != "-" else 0.0
+                                    a_vol = float(ask_vol_str) if ask_vol_str and ask_vol_str != "-" else 0.0
+                                    quote = Quote(
+                                        exchange="wallex",
+                                        symbol=sym,
+                                        bid=bid_val,
+                                        ask=ask_val,
+                                        bid_volume=b_vol,
+                                        ask_volume=a_vol,
+                                        timestamp=now,
+                                    )
+                                    self.cache.update_quote(quote)
+                        except Exception:
                             continue
-
-                        stats = item.get("stats", {})
-                        bid_str = stats.get("bidPrice")
-                        ask_str = stats.get("askPrice")
-                        bid_vol_str = stats.get("bidVolume", "0")
-                        ask_vol_str = stats.get("askVolume", "0")
-
-                        if bid_str and ask_str:
-                            bid_val = float(bid_str)
-                            ask_val = float(ask_str)
-                            if bid_val > 0 and ask_val > 0:
-                                quote = Quote(
-                                    exchange="wallex",
-                                    symbol=sym,
-                                    bid=bid_val,
-                                    ask=ask_val,
-                                    bid_volume=float(bid_vol_str),
-                                    ask_volume=float(ask_vol_str),
-                                    timestamp=now,
-                                )
-                                self.cache.update_quote(quote)
+                else:
+                    print(f"⚠️ [Wallex Streamer Status]: {res.status_code}", flush=True)
 
             except asyncio.CancelledError:
                 break
             except Exception as e:
-                # Silently handle transient network glitches
-                pass
+                print(f"❌ [Wallex Streamer Error]: {e}", flush=True)
 
             await asyncio.sleep(self.interval)

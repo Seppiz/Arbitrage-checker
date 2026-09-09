@@ -34,14 +34,13 @@ class Opportunity:
     timestamp: float = 0.0
 
     def format_details(self) -> str:
-        depth_flag = " ✅ (Full Depth)" if self.has_sufficient_depth else " ⚠️ (Thin Orderbook)"
+        depth_flag = " ✅" if self.has_sufficient_depth else " ⚠️ (Low Depth)"
         return (
-            f"💰 <b>{self.symbol}</b> | {self.buy_exchange.upper()} ➡️ {self.sell_exchange.upper()}{depth_flag}\n"
-            f"• Buy: {self.buy_price:,.6g} USDT on {self.buy_exchange.upper()}\n"
-            f"• Sell: {self.sell_price:,.6g} USDT on {self.sell_exchange.upper()}\n"
-            f"• Spread: {self.spread_pct:+.2f}%\n"
-            f"• Fees: {self.total_fees_usdt:.2f} USDT\n"
-            f"• <b>Net Profit: {self.net_profit_usdt:+.2f} USDT ({self.roi_pct:+.2f}% ROI)</b>"
+            f"📡 <b>ARBITRAGE OPPORTUNITY FOUND</b> | #{self.symbol}{depth_flag}\n\n"
+            f"🛒 <b>Buy:</b> {self.buy_exchange.upper()} @ {self.buy_price:,.6g} USDT\n"
+            f"🏷️ <b>Sell:</b> {self.sell_exchange.upper()} @ {self.sell_price:,.6g} USDT\n"
+            f"📊 <b>Gross Spread:</b> {self.spread_pct:+.2f}%\n"
+            f"💎 <b>Est. Net Profit:</b> +{self.net_profit_usdt:.2f} USDT (+{self.roi_pct:+.2f}% ROI)"
         )
 
 
