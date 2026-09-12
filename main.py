@@ -152,8 +152,20 @@ async def main():
     bitpin_client = BitpinClient(api_key=config.bitpin_api_key, dry_run=config.dry_run)
     wallex_client = WallexClient(api_key=config.wallex_api_key, dry_run=config.dry_run)
 
-    async with httpx.AsyncClient(timeout=10.0, trust_env=True) as tg_client, \
-               httpx.AsyncClient(timeout=10.0, trust_env=False) as exchange_client:
+    # Dedicated Split-Networking:
+    # 1. exchange_client: ONLY for Iranian exchange APIs (Nobitex, Wallex, Bitpin).
+    #    Guaranteed direct connection through the Iranian VPS's native IP (proxy=None, trust_env=False).
+    # 2. tg_client: ONLY for Telegram API alerts, receipts, and polling.
+    #    Uses proxy configured via TELEGRAM_PROXY if set, without affecting Iranian exchange traffic.
+    tg_proxy = config.telegram_proxy if config.telegram_proxy else None
+    if tg_proxy:
+        print(f"🔒 [Network] Telegram Proxy: ENABLED ({tg_proxy})", flush=True)
+    else:
+        print("🌐 [Network] Telegram Proxy: None (Direct / System connection)", flush=True)
+    print("🇮🇷 [Network] Iranian Exchange APIs: DIRECT connection via server IP (No proxy)\n", flush=True)
+
+    async with httpx.AsyncClient(timeout=15.0, proxy=tg_proxy, trust_env=False) as tg_client, \
+               httpx.AsyncClient(timeout=10.0, proxy=None, trust_env=False) as exchange_client:
         # 3. Initialize Execution Engine & Dynamic Inventory Manager
         def on_trade_receipt(receipt: str):
             asyncio.create_task(bot.broadcast(tg_client, receipt))

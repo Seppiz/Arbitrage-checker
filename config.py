@@ -33,6 +33,7 @@ class BotConfig:
         ]
     )
     subscribers_file: str = os.getenv("SUBSCRIBERS_FILE", "subscribers.json")
+    telegram_proxy: str = os.getenv("TELEGRAM_PROXY", "").strip()
 
     # Exchange API Credentials
     nobitex_api_token: str = os.getenv("NOBITEX_API_TOKEN", "")
