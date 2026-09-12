@@ -18,6 +18,14 @@ class Quote:
 
 
 @dataclass
+class InventorySnapshot:
+    exchange: str
+    usdt: float
+    coins: dict
+    timestamp: float = 0.0
+
+
+@dataclass
 class Opportunity:
     symbol: str
     buy_exchange: str
@@ -32,15 +40,20 @@ class Opportunity:
     total_fees_usdt: float = 0.0
     has_sufficient_depth: bool = True
     timestamp: float = 0.0
+    inventory_skew: float = 0.0
+    effective_min_roi_pct: float = 0.0
+    is_rebalancing_trade: bool = False
 
     def format_details(self) -> str:
         depth_flag = " ✅" if self.has_sufficient_depth else " ⚠️ (Low Depth)"
+        rebalance_tag = "\n⚖️ <b>Self-Healing Rebalancing Trade</b> (Auto-Inventory Discount Applied)" if self.is_rebalancing_trade else ""
         return (
             f"📡 <b>ARBITRAGE OPPORTUNITY FOUND</b> | #{self.symbol}{depth_flag}\n\n"
             f"🛒 <b>Buy:</b> {self.buy_exchange.upper()} @ {self.buy_price:,.6g} USDT\n"
             f"🏷️ <b>Sell:</b> {self.sell_exchange.upper()} @ {self.sell_price:,.6g} USDT\n"
             f"📊 <b>Gross Spread:</b> {self.spread_pct:+.2f}%\n"
             f"💎 <b>Est. Net Profit:</b> +{self.net_profit_usdt:.2f} USDT (+{self.roi_pct:+.2f}% ROI)"
+            f"{rebalance_tag}"
         )
 
 

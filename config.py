@@ -3,6 +3,9 @@ from dataclasses import dataclass, field
 from typing import List, Dict
 from dotenv import load_dotenv
 
+env_path = os.path.join(os.path.dirname(__file__), ".env")
+if os.path.exists(env_path):
+    load_dotenv(env_path)
 load_dotenv()
 
 # List of 36 cryptocurrencies from original main.py
@@ -49,6 +52,19 @@ class BotConfig:
     max_quote_age_seconds: float = float(os.getenv("MAX_QUOTE_AGE_SECONDS", "2.0"))
     enable_auto_rollback: bool = os.getenv("ENABLE_AUTO_ROLLBACK", "true").lower() in ("true", "1", "yes")
     require_sufficient_depth: bool = os.getenv("REQUIRE_SUFFICIENT_DEPTH", "true").lower() in ("true", "1", "yes")
+
+    # Dynamic Inventory Skewing & Self-Healing Settings
+    enable_inventory_skewing: bool = os.getenv("ENABLE_INVENTORY_SKEWING", "true").lower() in ("true", "1", "yes")
+    inventory_sync_interval: float = float(os.getenv("INVENTORY_SYNC_INTERVAL", "12.0"))
+    target_inventory_ratio: float = float(os.getenv("TARGET_INVENTORY_RATIO", "0.50"))
+    inventory_penalty_factor: float = float(os.getenv("INVENTORY_PENALTY_FACTOR", "1.5"))
+    inventory_discount_factor: float = float(os.getenv("INVENTORY_DISCOUNT_FACTOR", "0.6"))
+    critical_inventory_threshold_pct: float = float(os.getenv("CRITICAL_INVENTORY_THRESHOLD_PCT", "10.0"))
+    priority_coins: List[str] = field(
+        default_factory=lambda: [
+            c.strip().upper() for c in os.getenv("PRIORITY_COINS", "NEAR,TRX,TON,ADA,ATOM").split(",") if c.strip()
+        ]
+    )
 
     # Coin list and fees
     symbols: List[str] = field(default_factory=lambda: DEFAULT_SYMBOLS)

@@ -17,7 +17,7 @@ from config import config, DEFAULT_SYMBOLS, DEFAULT_FEES_PERCENT
 from models import Quote, Opportunity, evaluate_arbitrage
 from exchanges import NobitexClient, BitpinClient, WallexClient
 from streamers import OrderBookCache, NobitexWebSocket, NobitexStreamer, BitpinWebSocket, WallexStreamer
-from execution import ArbitrageExecutor
+from execution import ArbitrageExecutor, InventoryManager
 from telegram_bot import SubscriberManager, TelegramBot
 
 # Re-export key variables for backward compatibility
@@ -103,6 +103,19 @@ async def telegram_polling_loop(bot: TelegramBot, executor: ArbitrageExecutor, n
         await asyncio.sleep(1.0)
 
 
+async def inventory_sync_loop(inv_mgr: InventoryManager, client: httpx.AsyncClient):
+    """Periodically refreshes dual-sided exchange balances in the background."""
+    print("🔄 [Inventory Manager] Initializing real-time portfolio balance tracking...", flush=True)
+    while True:
+        try:
+            await inv_mgr.sync_balances(client)
+        except asyncio.CancelledError:
+            break
+        except Exception:
+            pass
+        await asyncio.sleep(config.inventory_sync_interval)
+
+
 async def main():
     print("=" * 80)
     print("🚀 REAL-TIME WEBSOCKET ARBITRAGE & AUTO-EXECUTION BOT")
@@ -141,14 +154,25 @@ async def main():
 
     async with httpx.AsyncClient(timeout=10.0, trust_env=True) as tg_client, \
                httpx.AsyncClient(timeout=10.0, trust_env=False) as exchange_client:
-        # 3. Initialize Execution Engine
+        # 3. Initialize Execution Engine & Dynamic Inventory Manager
         def on_trade_receipt(receipt: str):
             asyncio.create_task(bot.broadcast(tg_client, receipt))
+
+        def on_critical_alert(alert_msg: str):
+            asyncio.create_task(bot.broadcast(tg_client, alert_msg, admin_only=True))
+
+        inv_clients = {
+            "nobitex": nobitex_client,
+            "bitpin": bitpin_client,
+            "wallex": wallex_client,
+        }
+        inventory_mgr = InventoryManager(clients=inv_clients, on_critical_alert_cb=on_critical_alert)
 
         executor = ArbitrageExecutor(
             nobitex=nobitex_client,
             bitpin=bitpin_client,
             wallex=wallex_client,
+            inventory_manager=inventory_mgr,
             on_trade_executed_cb=on_trade_receipt,
         )
 
@@ -157,22 +181,30 @@ async def main():
         last_tg_alert: dict = {}
 
         def on_opportunity_detected(opp: Opportunity):
+            # Evaluate dynamic inventory skewing and effective hurdle rate
+            if inventory_mgr:
+                opp = inventory_mgr.evaluate_effective_roi(opp)
+                effective_hurdle = opp.effective_min_roi_pct
+            else:
+                effective_hurdle = config.min_roi_pct
+
             now = time.time()
             # Throttle console printing per symbol to once every 5 seconds to keep terminal clean
             if now - last_console_log.get(opp.symbol, 0) >= 5.0:
                 last_console_log[opp.symbol] = now
                 now_str = datetime.now().strftime("%H:%M:%S")
+                rebal_flag = " ⚖️[Rebalancing]" if opp.is_rebalancing_trade else ""
                 try:
                     print(
-                        f"\n🔥 [{now_str}] LIVE ARBITRAGE: {opp.symbol} | {opp.buy_exchange.upper()} -> {opp.sell_exchange.upper()} "
-                        f"| Spread: {opp.spread_pct:+.2f}% | Net Profit: +{opp.net_profit_usdt:.2f} USDT (+{opp.roi_pct:.2f}% ROI)",
+                        f"\n🔥 [{now_str}] LIVE ARBITRAGE: {opp.symbol}{rebal_flag} | {opp.buy_exchange.upper()} -> {opp.sell_exchange.upper()} "
+                        f"| Spread: {opp.spread_pct:+.2f}% | Net Profit: +{opp.net_profit_usdt:.2f} USDT (+{opp.roi_pct:.2f}% ROI, Min: {effective_hurdle:.2f}%)",
                         flush=True,
                     )
                 except Exception:
                     pass
 
-            # Broadcast opportunity alert to Telegram if meets minimum ROI and cooldown
-            if opp.roi_pct >= config.min_roi_pct and opp.net_profit_usdt >= config.min_profit_usdt:
+            # Broadcast opportunity alert to Telegram if meets effective hurdle and cooldown
+            if opp.roi_pct >= effective_hurdle and opp.net_profit_usdt >= config.min_profit_usdt:
                 tg_cooldown = max(15, config.trade_cooldown_seconds)
                 if now - last_tg_alert.get(opp.symbol, 0) >= tg_cooldown:
                     last_tg_alert[opp.symbol] = now
@@ -199,6 +231,9 @@ async def main():
         )
 
         tasks = []
+        # Real-time dynamic inventory synchronization
+        tasks.append(asyncio.create_task(inventory_sync_loop(inventory_mgr, exchange_client)))
+
         if "nobitex" in config.enabled_exchanges:
             nobitex_streamer = NobitexStreamer(cache, config.symbols, interval=1.5)
             tasks.append(asyncio.create_task(nobitex_streamer.run(exchange_client)))

@@ -97,16 +97,21 @@ class TelegramBot:
             "text": text,
             "parse_mode": "HTML",
         }
-        try:
-            res = await client.post(url, json=payload, timeout=5.0)
-            if res.status_code == 400 and "can't parse entities" in res.text:
-                payload.pop("parse_mode", None)
-                res = await client.post(url, json=payload, timeout=5.0)
-            res.raise_for_status()
-            return True
-        except Exception as e:
-            print(f"\n[Telegram Error] Failed to send to {chat_id}: {e}", flush=True)
-            return False
+        for attempt in range(2):
+            try:
+                res = await client.post(url, json=payload, timeout=12.0)
+                if res.status_code == 400 and "can't parse entities" in res.text:
+                    payload.pop("parse_mode", None)
+                    res = await client.post(url, json=payload, timeout=12.0)
+                res.raise_for_status()
+                return True
+            except Exception as e:
+                if attempt == 0:
+                    await asyncio.sleep(1.0)
+                    continue
+                print(f"\n[Telegram Error] Failed to send to {chat_id}: {e}", flush=True)
+                return False
+        return False
 
     async def broadcast(self, client: httpx.AsyncClient, text: str, admin_only: bool = False) -> None:
         if not self.token:
@@ -225,6 +230,16 @@ class TelegramBot:
                     msg_bal = "💼 <b>موجودی حساب شما در صرافی‌های فعال:</b>\n\n" + "\n\n".join(bal_sections)
                     await self.send_message(client, chat_id, msg_bal)
 
+                elif text in ("/inventory", "/rebalance"):
+                    if not is_admin:
+                        await self.send_message(client, chat_id, "⛔ <b>Access Denied:</b> دسترسی به تحلیل موجودی تنها برای ادمین مجاز است.")
+                        continue
+                    if hasattr(executor, "inventory_mgr") and executor.inventory_mgr:
+                        report = executor.inventory_mgr.get_health_report()
+                        await self.send_message(client, chat_id, report)
+                    else:
+                        await self.send_message(client, chat_id, "⚠️ پایشگر توازن موجودی در حال حاضر غیرفعال است.")
+
                 elif text.startswith("/dryrun") and is_admin:
                     parts = text.split()
                     if len(parts) > 1 and parts[1].lower() in ("off", "false", "0"):
@@ -280,6 +295,7 @@ class TelegramBot:
                         "/stop - Unsubscribe\n"
                         "/status - Check live status\n"
                         "/balance - View wallet balances\n"
+                        "/inventory - View portfolio health & rebalance advice\n"
                         "/help - Show this guide"
                         f"{admin_help}"
                     )
